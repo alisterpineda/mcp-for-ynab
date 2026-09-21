@@ -1,5 +1,5 @@
-import type { Deletable, Month, PlanDetail } from "../ynab/types.js";
-import { CACHE_SCHEMA_VERSION, type CacheData } from "./schema.js";
+import type { BudgetDetail, Deletable, Month } from "../ynab/types.js";
+import { CACHE_SCHEMA_VERSION, ID_KEYED_COLLECTIONS, emptyCollections, type CacheData } from "./schema.js";
 
 export interface DeltaStats {
   upserted: number;
@@ -7,23 +7,13 @@ export interface DeltaStats {
 }
 
 /** Build a fresh cache from a full (non-delta) budget response. */
-export function buildCache(budget: PlanDetail, serverKnowledge: number, now: Date): CacheData {
-  const iso = now.toISOString();
+export function buildCache(budget: BudgetDetail, serverKnowledge: number, now: Date): CacheData {
   const cache: CacheData = {
     schemaVersion: CACHE_SCHEMA_VERSION,
     budget: toMeta(budget),
     serverKnowledge,
-    lastSyncedAt: iso,
-    lastFullSyncAt: iso,
-    accounts: {},
-    payees: {},
-    categoryGroups: {},
-    categories: {},
-    months: {},
-    transactions: {},
-    subtransactions: {},
-    scheduledTransactions: {},
-    scheduledSubtransactions: {},
+    lastSyncedAt: now.toISOString(),
+    ...emptyCollections(),
   };
   applyDelta(cache, budget, serverKnowledge, now);
   return cache;
@@ -33,27 +23,22 @@ export function buildCache(budget: PlanDetail, serverKnowledge: number, now: Dat
  * Merge a budget response into the cache in place. Works for both full and delta payloads:
  * every entity is upserted by id, and entities flagged `deleted` are removed.
  */
-export function applyDelta(cache: CacheData, budget: PlanDetail, serverKnowledge: number, now: Date): DeltaStats {
+export function applyDelta(cache: CacheData, budget: BudgetDetail, serverKnowledge: number, now: Date): DeltaStats {
   const stats: DeltaStats = { upserted: 0, deleted: 0 };
 
   cache.budget = toMeta(budget);
   cache.serverKnowledge = serverKnowledge;
   cache.lastSyncedAt = now.toISOString();
 
-  mergeById(cache.accounts, budget.accounts, stats);
-  mergeById(cache.payees, budget.payees, stats);
-  mergeById(cache.categoryGroups, budget.category_groups, stats);
-  mergeById(cache.categories, budget.categories, stats);
-  mergeById(cache.transactions, budget.transactions, stats);
-  mergeById(cache.subtransactions, budget.subtransactions, stats);
-  mergeById(cache.scheduledTransactions, budget.scheduled_transactions, stats);
-  mergeById(cache.scheduledSubtransactions, budget.scheduled_subtransactions, stats);
+  for (const [cacheKey, budgetKey] of ID_KEYED_COLLECTIONS) {
+    mergeById(cache[cacheKey], budget[budgetKey], stats);
+  }
   mergeMonths(cache.months, budget.months, stats);
 
   return stats;
 }
 
-function toMeta(budget: PlanDetail): CacheData["budget"] {
+function toMeta(budget: BudgetDetail): CacheData["budget"] {
   return {
     id: budget.id,
     name: budget.name,
@@ -65,7 +50,7 @@ function toMeta(budget: PlanDetail): CacheData["budget"] {
   };
 }
 
-function mergeById<T extends Deletable>(target: Record<string, T>, incoming: T[] | undefined, stats: DeltaStats): void {
+function mergeById(target: Record<string, Deletable>, incoming: readonly Deletable[] | undefined, stats: DeltaStats): void {
   for (const entity of incoming ?? []) {
     if (entity.deleted) {
       if (entity.id in target) stats.deleted++;

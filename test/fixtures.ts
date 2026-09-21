@@ -1,11 +1,11 @@
-import type { Account, Category, CategoryGroup, Month, Payee, PlanDetail, SubTransaction, Transaction } from "../src/ynab/types.js";
+import type { Account, Category, CategoryGroup, Month, Payee, BudgetDetail, SubTransaction, Transaction } from "../src/ynab/types.js";
 import type { BudgetSource, RateLimit } from "../src/ynab/client.js";
 
-export const PLAN_ID = "plan-1";
+export const BUDGET_ID = "budget-1";
 
-export function planDetail(overrides: Partial<PlanDetail> = {}): PlanDetail {
+export function budgetDetail(overrides: Partial<BudgetDetail> = {}): BudgetDetail {
   return {
-    id: PLAN_ID,
+    id: BUDGET_ID,
     name: "Household",
     last_modified_on: "2026-09-21T12:00:00Z",
     first_month: "2024-01-01",
@@ -87,8 +87,8 @@ export function subtransaction(id: string, transactionId: string, amount: number
 }
 
 /** A small but complete budget: two accounts, two categories, one split transaction. */
-export function fullPlan(): PlanDetail {
-  return planDetail({
+export function fullBudget(): BudgetDetail {
+  return budgetDetail({
     accounts: [account("a1", "Checking"), account("a2", "Old savings", { closed: true })],
     payees: [payee("p1", "Costco"), payee("p2", "Landlord")],
     category_groups: [categoryGroup("g1", "Everyday")],
@@ -124,8 +124,8 @@ export class FakeBudgetSource implements BudgetSource {
   budgetList: { budgets: { id: string; name: string }[]; defaultBudget: { id: string; name: string } | null } | null = null;
 
   constructor(
-    public full: PlanDetail = fullPlan(),
-    public delta: PlanDetail = planDetail(),
+    public full: BudgetDetail = fullBudget(),
+    public delta: BudgetDetail = budgetDetail(),
     public fullKnowledge = 10,
     public deltaKnowledge = 11,
   ) {}

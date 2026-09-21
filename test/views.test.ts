@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { buildCache } from "../src/cache/delta.js";
 import { flattenTransactions, transactionDateRange } from "../src/cache/views.js";
-import { category, fullPlan, planDetail, transaction } from "./fixtures.js";
+import { category, fullBudget, budgetDetail, transaction } from "./fixtures.js";
 
 const NOW = new Date("2026-09-21T14:00:00Z");
 
 describe("flattenTransactions", () => {
-  const lines = flattenTransactions(buildCache(fullPlan(), 10, NOW));
+  const lines = flattenTransactions(buildCache(fullBudget(), 10, NOW));
 
   it("emits one line per plain transaction and one per split line", () => {
     assert.equal(lines.length, 5);
@@ -51,16 +51,16 @@ describe("flattenTransactions", () => {
   });
 
   it("falls back to the category's own group name when the group is not cached", () => {
-    const plan = planDetail({
+    const budget = budgetDetail({
       categories: [category("c9", "Orphan", { category_group_id: "missing", category_group_name: "From category" })],
       transactions: [transaction("x", "2026-01-01", -1, { category_id: "c9" })],
     });
-    const [line] = flattenTransactions(buildCache(plan, 1, NOW));
+    const [line] = flattenTransactions(buildCache(budget, 1, NOW));
     assert.equal(line.categoryGroupName, "From category");
   });
 
   it("handles missing lookups without throwing", () => {
-    const cache = buildCache(planDetail({ transactions: [transaction("x", "2026-01-01", -1, { account_id: "gone", payee_id: "gone", category_id: "gone" })] }), 1, NOW);
+    const cache = buildCache(budgetDetail({ transactions: [transaction("x", "2026-01-01", -1, { account_id: "gone", payee_id: "gone", category_id: "gone" })] }), 1, NOW);
     const [line] = flattenTransactions(cache);
     assert.equal(line.accountName, "(unknown account)");
     assert.equal(line.payeeName, null);
@@ -70,10 +70,10 @@ describe("flattenTransactions", () => {
 
 describe("transactionDateRange", () => {
   it("returns the earliest and latest transaction dates", () => {
-    assert.deepEqual(transactionDateRange(buildCache(fullPlan(), 10, NOW)), { earliest: "2026-08-01", latest: "2026-09-12" });
+    assert.deepEqual(transactionDateRange(buildCache(fullBudget(), 10, NOW)), { earliest: "2026-08-01", latest: "2026-09-12" });
   });
 
   it("returns null with no transactions", () => {
-    assert.equal(transactionDateRange(buildCache(planDetail(), 1, NOW)), null);
+    assert.equal(transactionDateRange(buildCache(budgetDetail(), 1, NOW)), null);
   });
 });

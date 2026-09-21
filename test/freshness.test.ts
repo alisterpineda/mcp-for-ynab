@@ -3,20 +3,20 @@ import { describe, it } from "node:test";
 import { buildCache } from "../src/cache/delta.js";
 import type { BudgetStore, SyncFailure } from "../src/cache/store.js";
 import { formatAge, freshnessLine } from "../src/freshness.js";
-import { planDetail } from "./fixtures.js";
+import { budgetDetail } from "./fixtures.js";
 
 const SYNCED = new Date("2026-09-21T14:00:00Z");
 const NOW = new Date("2026-09-21T14:05:00Z");
 
 /** A stand-in for the store: `freshnessLine` only reads `failedSinceLastSync`. */
 function storeWith(failure: SyncFailure | null): BudgetStore {
-  const cache = buildCache(planDetail(), 1, SYNCED);
+  const cache = buildCache(budgetDetail(), 1, SYNCED);
   const stale = failure && failure.at.getTime() > Date.parse(cache.lastSyncedAt) ? failure : null;
   return { failedSinceLastSync: stale } as unknown as BudgetStore;
 }
 
 describe("freshnessLine", () => {
-  const cache = buildCache(planDetail(), 1, SYNCED);
+  const cache = buildCache(budgetDetail(), 1, SYNCED);
 
   it("reports the sync time when the latest sync succeeded", () => {
     assert.match(freshnessLine(storeWith(null), cache, NOW), /^Data as of .*\.$/);

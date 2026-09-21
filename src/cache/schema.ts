@@ -1,5 +1,6 @@
 import type {
   Account,
+  BudgetDetail,
   Category,
   CategoryGroup,
   CurrencyFormat,
@@ -13,7 +14,7 @@ import type {
 } from "../ynab/types.js";
 
 /** Bump when the on-disk shape changes; older files are discarded and rebuilt with a full sync. */
-export const CACHE_SCHEMA_VERSION = 1;
+export const CACHE_SCHEMA_VERSION = 2;
 
 export interface BudgetMeta {
   id: string;
@@ -32,8 +33,6 @@ export interface CacheData {
   serverKnowledge: number;
   /** ISO timestamp of the last successful sync (delta or full). */
   lastSyncedAt: string;
-  /** ISO timestamp of the last full (non-delta) sync. */
-  lastFullSyncAt: string;
   accounts: Record<string, Account>;
   payees: Record<string, Payee>;
   categoryGroups: Record<string, CategoryGroup>;
@@ -45,17 +44,38 @@ export interface CacheData {
   scheduledSubtransactions: Record<string, ScheduledSubTransaction>;
 }
 
-const ENTITY_COLLECTIONS = [
-  "accounts",
-  "payees",
-  "categoryGroups",
-  "categories",
-  "months",
-  "transactions",
-  "subtransactions",
-  "scheduledTransactions",
-  "scheduledSubtransactions",
-] as const;
+/**
+ * Cache collections that hold id-keyed entities, paired with the budget-response list they come
+ * from. `buildCache`, `applyDelta`, validation, and `countEntities` all iterate this table, so
+ * adding a collection means adding it to the `CacheData` interface and this table only.
+ * Months are handled separately: they are keyed by date and merged per category.
+ */
+export const ID_KEYED_COLLECTIONS = [
+  ["accounts", "accounts"],
+  ["payees", "payees"],
+  ["categoryGroups", "category_groups"],
+  ["categories", "categories"],
+  ["transactions", "transactions"],
+  ["subtransactions", "subtransactions"],
+  ["scheduledTransactions", "scheduled_transactions"],
+  ["scheduledSubtransactions", "scheduled_subtransactions"],
+] as const satisfies ReadonlyArray<readonly [keyof CacheData, keyof BudgetDetail]>;
+
+export type IdKeyedCollection = (typeof ID_KEYED_COLLECTIONS)[number][0];
+export type EntityCollection = IdKeyedCollection | "months";
+
+export const ENTITY_COLLECTIONS: readonly EntityCollection[] = [...ID_KEYED_COLLECTIONS.map(([key]) => key), "months"];
+
+export function emptyCollections(): Pick<CacheData, EntityCollection> {
+  const collections: Partial<Record<EntityCollection, Record<string, unknown>>> = {};
+  for (const key of ENTITY_COLLECTIONS) collections[key] = {};
+  return collections as Pick<CacheData, EntityCollection>;
+}
+
+/** Total number of entities across every collection. */
+export function countEntities(cache: CacheData): number {
+  return ENTITY_COLLECTIONS.reduce((total, key) => total + Object.keys(cache[key]).length, 0);
+}
 
 /** Why `value` is not a usable CacheData, or null when it is. */
 export function cacheDataProblem(value: unknown): string | null {

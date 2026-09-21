@@ -1,6 +1,6 @@
 import { YnabApiError, type BudgetSource } from "../ynab/client.js";
 import { applyDelta, buildCache, type DeltaStats } from "./delta.js";
-import type { CacheData } from "./schema.js";
+import { countEntities, type CacheData } from "./schema.js";
 import { CacheStorage } from "./storage.js";
 
 export const DEFAULT_TTL_MS = 5 * 60 * 1000;
@@ -188,18 +188,4 @@ export class BudgetStore {
     this.log(`using budget "${chosen.name}" (${chosen.id})`);
     return chosen.id;
   }
-}
-
-function countEntities(cache: CacheData): number {
-  return (
-    Object.keys(cache.accounts).length +
-    Object.keys(cache.payees).length +
-    Object.keys(cache.categoryGroups).length +
-    Object.keys(cache.categories).length +
-    Object.keys(cache.months).length +
-    Object.keys(cache.transactions).length +
-    Object.keys(cache.subtransactions).length +
-    Object.keys(cache.scheduledTransactions).length +
-    Object.keys(cache.scheduledSubtransactions).length
-  );
 }

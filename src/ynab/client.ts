@@ -1,5 +1,5 @@
 import * as ynab from "ynab";
-import type { PlanDetail, PlanSummary } from "./types.js";
+import type { BudgetDetail, BudgetSummary } from "./types.js";
 
 export class YnabApiError extends Error {
   constructor(
@@ -23,8 +23,8 @@ export interface RateLimit {
 /** The subset of the YNAB API this server uses, expressed as plain results with errors normalised. */
 export interface BudgetSource {
   readonly lastRateLimit: RateLimit | null;
-  listBudgets(): Promise<{ budgets: PlanSummary[]; defaultBudget: PlanSummary | null }>;
-  getBudget(budgetId: string, lastKnowledgeOfServer?: number): Promise<{ budget: PlanDetail; serverKnowledge: number }>;
+  listBudgets(): Promise<{ budgets: BudgetSummary[]; defaultBudget: BudgetSummary | null }>;
+  getBudget(budgetId: string, lastKnowledgeOfServer?: number): Promise<{ budget: BudgetDetail; serverKnowledge: number }>;
 }
 
 /**

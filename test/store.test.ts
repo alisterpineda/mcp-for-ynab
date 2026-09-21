@@ -7,7 +7,7 @@ import { buildCache } from "../src/cache/delta.js";
 import { BudgetStore } from "../src/cache/store.js";
 import { CacheStorage } from "../src/cache/storage.js";
 import { YnabApiError } from "../src/ynab/client.js";
-import { FakeBudgetSource, PLAN_ID, planDetail, transaction } from "./fixtures.js";
+import { FakeBudgetSource, BUDGET_ID, budgetDetail, transaction } from "./fixtures.js";
 
 let dir: string;
 beforeEach(async () => {
@@ -31,7 +31,7 @@ describe("BudgetStore.ensureFresh", () => {
     const client = new FakeBudgetSource();
     const store = makeStore(client);
     const cache = await store.ensureFresh();
-    assert.deepEqual(client.calls, [{ budgetId: PLAN_ID, knowledge: undefined }]);
+    assert.deepEqual(client.calls, [{ budgetId: BUDGET_ID, knowledge: undefined }]);
     assert.equal(store.lastSync?.kind, "full");
     assert.equal(cache.serverKnowledge, 10);
     assert.equal(Object.keys(cache.transactions).length, 3);
@@ -39,7 +39,7 @@ describe("BudgetStore.ensureFresh", () => {
 
   it("answers from memory within the TTL and syncs a delta once stale", async () => {
     const client = new FakeBudgetSource();
-    client.delta = planDetail({ transactions: [transaction("t9", "2026-09-21", -1_000)] });
+    client.delta = budgetDetail({ transactions: [transaction("t9", "2026-09-21", -1_000)] });
     const store = makeStore(client, { ttlMs: 60_000 });
     await store.ensureFresh();
     await store.ensureFresh();
@@ -48,7 +48,7 @@ describe("BudgetStore.ensureFresh", () => {
     const stale = makeStore(client, { ttlMs: 0 });
     const cache = await stale.ensureFresh();
     assert.equal(client.calls.length, 2);
-    assert.deepEqual(client.calls[1], { budgetId: PLAN_ID, knowledge: 10 });
+    assert.deepEqual(client.calls[1], { budgetId: BUDGET_ID, knowledge: 10 });
     assert.equal(stale.lastSync?.kind, "delta");
     assert.equal(cache.serverKnowledge, 11);
     assert.ok("t9" in cache.transactions);
@@ -107,7 +107,7 @@ describe("BudgetStore persistence", () => {
     const client2 = new FakeBudgetSource();
     const store2 = makeStore(client2, { ttlMs: 0 });
     const cache = await store2.ensureFresh();
-    assert.deepEqual(client2.calls, [{ budgetId: PLAN_ID, knowledge: 10 }]);
+    assert.deepEqual(client2.calls, [{ budgetId: BUDGET_ID, knowledge: 10 }]);
     assert.equal(cache.serverKnowledge, 11);
   });
 
@@ -118,7 +118,7 @@ describe("BudgetStore persistence", () => {
     const client = new FakeBudgetSource();
     const store = makeStore(client, { ttlMs: 0 });
     await Promise.all([store.ensureFresh(), store.ensureFresh({ force: true })]);
-    assert.deepEqual(client.calls, [{ budgetId: PLAN_ID, knowledge: 10 }], "one delta sync, never a full download");
+    assert.deepEqual(client.calls, [{ budgetId: BUDGET_ID, knowledge: 10 }], "one delta sync, never a full download");
     assert.equal(store.lastSync?.kind, "delta");
   });
 
@@ -126,7 +126,7 @@ describe("BudgetStore persistence", () => {
     await writeFile(path.join(dir, "cache.json"), "{not json");
     const client = new FakeBudgetSource();
     const cache = await makeStore(client).ensureFresh();
-    assert.deepEqual(client.calls, [{ budgetId: PLAN_ID, knowledge: undefined }]);
+    assert.deepEqual(client.calls, [{ budgetId: BUDGET_ID, knowledge: undefined }]);
     assert.equal(cache.serverKnowledge, 10);
   });
 
@@ -139,14 +139,14 @@ describe("BudgetStore persistence", () => {
 
     const client = new FakeBudgetSource();
     await makeStore(client).ensureFresh();
-    assert.deepEqual(client.calls, [{ budgetId: PLAN_ID, knowledge: undefined }]);
+    assert.deepEqual(client.calls, [{ budgetId: BUDGET_ID, knowledge: undefined }]);
   });
 
   it("discards a cache for a different budget than the one configured", async () => {
     await makeStore(new FakeBudgetSource()).ensureFresh();
     const client = new FakeBudgetSource();
-    await makeStore(client, { budgetId: "another-plan" }).ensureFresh();
-    assert.deepEqual(client.calls, [{ budgetId: "another-plan", knowledge: undefined }]);
+    await makeStore(client, { budgetId: "another-budget" }).ensureFresh();
+    assert.deepEqual(client.calls, [{ budgetId: "another-budget", knowledge: undefined }]);
   });
 
   it("fullResync discards the cache and downloads everything again", async () => {
@@ -163,21 +163,21 @@ describe("BudgetStore persistence", () => {
 
   it("uses the only budget when YNAB reports no default", async () => {
     const client = new FakeBudgetSource();
-    client.budgetList = { budgets: [{ id: PLAN_ID, name: "Household" }], defaultBudget: null };
+    client.budgetList = { budgets: [{ id: BUDGET_ID, name: "Household" }], defaultBudget: null };
     await makeStore(client).ensureFresh();
-    assert.deepEqual(client.calls, [{ budgetId: PLAN_ID, knowledge: undefined }]);
+    assert.deepEqual(client.calls, [{ budgetId: BUDGET_ID, knowledge: undefined }]);
   });
 
   it("refuses to guess between several budgets when none is default", async () => {
     const client = new FakeBudgetSource();
     client.budgetList = {
       budgets: [
-        { id: PLAN_ID, name: "Household" },
-        { id: "plan-2", name: "Business" },
+        { id: BUDGET_ID, name: "Household" },
+        { id: "budget-2", name: "Business" },
       ],
       defaultBudget: null,
     };
-    await assert.rejects(makeStore(client).ensureFresh(), /YNAB_BUDGET_ID.*plan-1.*plan-2/);
+    await assert.rejects(makeStore(client).ensureFresh(), /YNAB_BUDGET_ID.*budget-1.*budget-2/);
     assert.equal(client.calls.length, 0);
   });
 
@@ -227,7 +227,7 @@ describe("BudgetStore persistence", () => {
 
   it("cleans up its temp file when the rename fails", async () => {
     await mkdir(path.join(dir, "cache.json")); // a directory in the way makes the rename fail
-    await assert.rejects(new CacheStorage(dir).save(buildCache(planDetail(), 1, new Date())));
+    await assert.rejects(new CacheStorage(dir).save(buildCache(budgetDetail(), 1, new Date())));
     const { readdir } = await import("node:fs/promises");
     assert.deepEqual(await readdir(dir), ["cache.json"], "no *.tmp left behind");
   });

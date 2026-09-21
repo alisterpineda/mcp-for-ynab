@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { buildCache } from "../src/cache/delta.js";
 import { CacheStorage, defaultCacheDir } from "../src/cache/storage.js";
-import { planDetail } from "./fixtures.js";
+import { budgetDetail } from "./fixtures.js";
 
 describe("defaultCacheDir", () => {
   const saved = process.env.YNAB_MCP_CACHE_DIR;
@@ -38,7 +38,7 @@ describe("CacheStorage.load", () => {
 
   async function saveThenMutate(mutate: (saved: Record<string, unknown>) => void) {
     const storage = new CacheStorage(dir);
-    await storage.save(buildCache(planDetail(), 1, new Date()));
+    await storage.save(buildCache(budgetDetail(), 1, new Date()));
     const saved = JSON.parse(await readFile(storage.filePath, "utf8"));
     mutate(saved);
     await writeFile(storage.filePath, JSON.stringify(saved));
