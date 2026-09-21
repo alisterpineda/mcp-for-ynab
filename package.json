@@ -1,0 +1,26 @@
+{
+  "name": "ynab-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for YNAB, packaged as a Claude Desktop extension",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --external:node:* --outfile=server/index.js",
+    "typecheck": "tsc --noEmit",
+    "inspect": "npm run build && npx @modelcontextprotocol/inspector node server/index.js",
+    "pack": "npm run build && mcpb pack . ynab-mcp.mcpb"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  },
+  "devDependencies": {
+    "@anthropic-ai/mcpb": "^2.1.2",
+    "@types/node": "^22.13.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "manifest_version": "0.3",
+  "name": "ynab-mcp",
+  "display_name": "YNAB",
+  "version": "0.1.0",
+  "description": "MCP server for YNAB (You Need A Budget).",
+  "license": "MIT",
+  "author": {
+    "name": "Alister Pineda"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"],
+      "env": {
+        "YNAB_ACCESS_TOKEN": "${user_config.ynab_access_token}"
+      }
+    }
+  },
+  "user_config": {
+    "ynab_access_token": {
+      "type": "string",
+      "title": "YNAB Personal Access Token",
+      "description": "Generate one at https://app.ynab.com/settings/developer",
+      "required": true,
+      "sensitive": true
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin"],
+    "runtimes": {
+      "node": ">=22.13.0"
+    }
+  }
+}
