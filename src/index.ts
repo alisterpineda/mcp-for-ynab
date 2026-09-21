@@ -1,6 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import pkg from "../package.json" with { type: "json" };
+import { BudgetStore } from "./cache/store.js";
+import { CacheStorage } from "./cache/storage.js";
+import { registerSyncStatus } from "./tools/sync-status.js";
+import { YnabClient } from "./ynab/client.js";
 
 // stdout carries the MCP protocol; all logging goes to stderr.
 const log = (message: string): void => console.error(`[ynab-mcp] ${message}`);
@@ -13,7 +17,20 @@ if (!token) {
 
 const version: string = pkg.version;
 
+const store = new BudgetStore({
+  client: new YnabClient(token),
+  storage: new CacheStorage(),
+  configuredBudgetId: process.env.YNAB_BUDGET_ID?.trim() || null,
+  log,
+});
+
 const server = new McpServer({ name: "ynab-mcp", version });
+registerSyncStatus(server, store);
 
 await server.connect(new StdioServerTransport());
 log(`started v${version}`);
+
+// Warm the cache in the background so the first tool call answers from memory.
+void store.ensureFresh().catch(() => {
+  // Already logged by the store; the first tool call will retry or fail soft.
+});
