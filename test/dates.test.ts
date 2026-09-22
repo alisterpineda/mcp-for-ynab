@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { currentMonth, dateRange, historyStart, MAX_MONTHS, monthWindow } from "../src/tools/dates.js";
+import { currentMonth, dateRange, historyStart, historyWindow, MAX_MONTHS, monthWindow } from "../src/tools/dates.js";
 import { ToolError } from "../src/tools/envelope.js";
 
 describe("dateRange", () => {
@@ -128,5 +128,54 @@ describe("historyStart", () => {
     assert.equal(historyStart(null, "2026-05-28"), "2026-05");
     assert.equal(historyStart("2026-07-01", null), "2026-07");
     assert.equal(historyStart(null, null), null);
+  });
+});
+
+describe("historyWindow", () => {
+  const today = new Date(2026, 8, 22);
+
+  it("keeps a window inside the history whole, flagging the current month partial", () => {
+    assert.deepEqual(historyWindow(["2026-07", "2026-08", "2026-09"], "2026-01", today), {
+      months: ["2026-07", "2026-08", "2026-09"],
+      from: "2026-07-01",
+      to: "2026-09-30",
+      cut: false,
+      partialMonth: "2026-09",
+    });
+  });
+
+  it("has no partial month when the window ends before the current one", () => {
+    const window = historyWindow(["2026-06", "2026-07"], "2026-01", today);
+    assert.equal(window.partialMonth, null);
+    assert.equal(window.to, "2026-07-31");
+  });
+
+  it("cuts a window reaching back before the history at its first month, and says so", () => {
+    const window = historyWindow(["2026-05", "2026-06", "2026-07"], "2026-06", today);
+    assert.deepEqual(window.months, ["2026-06", "2026-07"]);
+    assert.equal(window.from, "2026-06-01");
+    assert.equal(window.cut, true);
+  });
+
+  it("keeps the whole window for a budget with no history to cut at", () => {
+    const window = historyWindow(["2026-05", "2026-06"], null, today);
+    assert.deepEqual(window.months, ["2026-05", "2026-06"]);
+    assert.equal(window.cut, false);
+  });
+
+  it("refuses a window past the current month", () => {
+    assert.throws(() => historyWindow(["2026-09", "2026-10"], null, today), (error: Error) => {
+      assert.ok(error instanceof ToolError);
+      assert.match(error.message, /ends at 2026-10, after the current month 2026-09/);
+      return true;
+    });
+  });
+
+  it("refuses a window wholly before the history, naming where it starts", () => {
+    assert.throws(() => historyWindow(["2026-01", "2026-02"], "2026-06", today), (error: Error) => {
+      assert.ok(error instanceof ToolError);
+      assert.match(error.message, /history starts at 2026-06/);
+      return true;
+    });
   });
 });

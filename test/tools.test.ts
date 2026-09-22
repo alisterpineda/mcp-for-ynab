@@ -8,7 +8,7 @@ import { harness } from "./mcp.js";
 
 const ORIENTATION_TOOLS = ["get_month", "list_accounts", "list_categories"];
 /** The analysis tools, which answer from the spending rule rather than describing the budget. */
-const SPENDING_TOOLS = ["spending_breakdown", "spending_trend", "search_transactions", "budget_vs_actual", "list_scheduled"];
+const SPENDING_TOOLS = ["cash_flow", "spending_breakdown", "spending_trend", "search_transactions", "budget_vs_actual", "list_scheduled"];
 const DATA_TOOLS = [...ORIENTATION_TOOLS, ...SPENDING_TOOLS];
 
 /** What a tool is called with when the bare `{}` of the default sets is not a question it can answer. */
@@ -26,6 +26,7 @@ const ORDERING: Record<string, RegExp> = {
   get_month: /ordered alphabetically, which is not YNAB's on-screen order/,
   list_accounts: /ordered alphabetically, which is not YNAB's on-screen order/,
   list_categories: /ordered alphabetically, which is not YNAB's on-screen order/,
+  cash_flow: /Months come in chronological order/,
   spending_breakdown: /sorted by `spent` descending/,
   spending_trend: /in chronological order/,
   search_transactions: /Rows come newest first/,

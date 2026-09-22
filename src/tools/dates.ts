@@ -70,6 +70,41 @@ export function historyStart(firstMonth: string | null, earliestDate: string | n
   return months.length === 0 ? null : months.reduce((a, b) => (a < b ? a : b));
 }
 
+/** A window of months a monthly report can show: begun, and inside the budget's history. */
+export interface HistoryWindow {
+  /** `YYYY-MM` keys, chronologically, never empty. */
+  months: string[];
+  /** The first day of the first month and the last day of the last: the range the lines are read over. */
+  from: string;
+  to: string;
+  /** True when the window asked for reached back before the budget and was cut at its first month. */
+  cut: boolean;
+  /** The current month when the window holds it, since its figures are still moving. */
+  partialMonth: string | null;
+}
+
+/**
+ * The months asked for, cut to the ones a report can show without inventing any. A window past the
+ * current month is refused: a month that has not started would read as a month of zeroes. For the
+ * same reason one reaching back before `floor` — the budget's first month, from `historyStart` —
+ * starts there instead and says so through `cut`, and one wholly before it is refused, naming where
+ * the history starts.
+ */
+export function historyWindow(asked: string[], floor: string | null, today: Date = new Date()): HistoryWindow {
+  const last = asked[asked.length - 1];
+  const current = currentMonth(today);
+  if (last > current) {
+    throw new ToolError(`The window ends at ${last}, after the current month ${current}; nothing has happened there yet.`);
+  }
+  const months = floor === null ? asked : asked.filter((month) => month >= floor);
+  if (months.length === 0) {
+    throw new ToolError(`The budget's history starts at ${floor}, after the window's end ${last}; there is nothing to report there.`);
+  }
+  // The months are whole, so the range is the first day of the first to the last day of the last.
+  const { from, to } = dateRange(months[0], last, today);
+  return { months, from, to, cut: months.length < asked.length, partialMonth: months.includes(current) ? current : null };
+}
+
 /** One end of a range, as a full ISO day. A month widens outwards, to the edge the end asks for. */
 function edge(input: string, which: "start" | "end", side: "first" | "last"): string {
   const value = input.trim();

@@ -230,7 +230,7 @@ describe("get_month refresh", () => {
       .sort();
     assert.deepEqual(
       refreshable,
-      ["budget_vs_actual", "get_month", "list_scheduled", "search_transactions", "spending_breakdown", "spending_trend", "sync_status"],
+      ["budget_vs_actual", "cash_flow", "get_month", "list_scheduled", "search_transactions", "spending_breakdown", "spending_trend", "sync_status"],
       "the report tools whose numbers move, plus sync_status, which is a health report rather than an answer",
     );
   });

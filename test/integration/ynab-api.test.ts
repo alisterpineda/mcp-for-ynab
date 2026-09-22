@@ -113,6 +113,8 @@ function assertOrientation(db: BudgetDb, budget: SyncedBudget): void {
 function assertSpending(db: BudgetDb, budget: SyncedBudget): void {
   const months = cachedMonths(db, budget.id);
   assert.ok(months.length > 0, "a real budget has cached months");
+  const [readyToAssignId] = db.resolveEntities(budget.id, { categories: ["Inflow: Ready to Assign"] }).categoryIds!;
+  const onBudget = db.accountRows(budget.id, { includeClosed: true }).accounts.filter((a) => a.onBudget).map((a) => a.id);
 
   for (const month of months) {
     const range = { from: `${month}-01`, to: `${month}-31` };
@@ -157,6 +159,18 @@ function assertSpending(db: BudgetDb, budget: SyncedBudget): void {
     const reported = db.monthCategories(budget.id, `${month}-01`).find((row) => row.categoryId === uncategorizedId)?.activity ?? 0;
     assert.equal(uncategorized.sum, reported, `${month}: uncategorized lines vs YNAB's Uncategorized activity`);
     assert.equal(uncategorizedSpending, reported, `${month}: the Uncategorized spending bucket vs YNAB's Uncategorized activity`);
+
+    // The cash flow: its income is Ready to Assign's own activity, its spending is the spending
+    // total, and the two together are exactly what the on-budget accounts grew by, since transfers
+    // between them cancel out. Its breakdowns add up to the figures they break down.
+    const flow = db.cashFlowByMonth(budget.id, range)[0] ?? { income: 0, spent: 0, toTracking: 0 };
+    const readyToAssign = db.monthCategories(budget.id, `${month}-01`).find((row) => row.categoryId === readyToAssignId)?.activity ?? 0;
+    assert.equal(flow.income, readyToAssign, `${month}: income lines vs Ready to Assign's activity`);
+    assert.equal(flow.spent, total.spent, `${month}: the cash flow's spending is the spending total`);
+    const grown = db.searchTotal(budget.id, { ...range, accountIds: onBudget }).sum;
+    assert.equal(flow.income + flow.spent, grown, `${month}: saved vs what the on-budget accounts grew by`);
+    assert.equal(sum(db.incomeBySource(budget.id, range).map((r) => r.amount)), flow.income, `${month}: income sources sum to the income`);
+    assert.equal(sum(db.trackingTransfers(budget.id, range).map((r) => r.amount)), flow.toTracking, `${month}: tracking accounts sum to their share`);
   }
 
   // Every scheduled transaction lands on a cached account with a frequency the tool can rate.

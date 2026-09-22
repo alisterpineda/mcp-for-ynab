@@ -101,6 +101,9 @@ export interface SpendingFilter {
   accountIds?: string[];
 }
 
+/** A date range and nothing else: the cash flow is the whole budget's, so it takes no entity filters. */
+export type DateFilter = Pick<SpendingFilter, "from" | "to">;
+
 /**
  * Which lines a search looks at: the spending filter plus the things only a drill-down asks for.
  * `minAmount`/`maxAmount` are inclusive milliunit bounds on the line's absolute amount, so "between
@@ -161,6 +164,31 @@ export interface SpendingExclusions {
   tracking: number;
   /** In an internal category (`Inflow: Ready to Assign`). */
   inflows: number;
+}
+
+/**
+ * One month of the budget's cash flow, from `cashFlowByMonth`. Milliunits with YNAB's sign, so
+ * `income` is positive and `spent` negative; `toTracking` is the part of `spent` that moved to a
+ * tracking account.
+ */
+export interface CashFlowMonth {
+  /** `YYYY-MM`. */
+  month: string;
+  income: number;
+  spent: number;
+  toTracking: number;
+}
+
+/** One source of income, or one tracking account money moved to, summed over a range. */
+export interface FlowAggregate {
+  /** The payee or account id; null for income with no payee. */
+  key: string | null;
+  name: string;
+  count: number;
+  /** Milliunits with YNAB's sign. */
+  amount: number;
+  /** How many distinct months have a line. */
+  months: number;
 }
 
 /** Names or ids the caller wants turned into ids, one list per kind. */
@@ -867,7 +895,7 @@ export class BudgetDb {
       WITH lines AS (${LINES_CTE})
       SELECT
         SUM(CASE WHEN COALESCE(a.on_budget, 0) = 0 THEN 1 ELSE 0 END) AS tracking,
-        SUM(CASE WHEN COALESCE(a.on_budget, 0) = 1 AND COALESCE(c.internal, 0) = 1 THEN 1 ELSE 0 END) AS inflows,
+        SUM(CASE WHEN COALESCE(a.on_budget, 0) = 1 AND ${INCOME_RULE} THEN 1 ELSE 0 END) AS inflows,
         SUM(CASE WHEN COALESCE(a.on_budget, 0) = 1 AND l.category_id IS NULL AND ${BUDGET_TRANSFER}
                  THEN 1 ELSE 0 END) AS transfers
       FROM lines l
@@ -876,6 +904,65 @@ export class BudgetDb {
       ${where.length ? `WHERE ${where.join(" AND ")}` : ""}`;
     const r = this.stmt(sql).get(params)!;
     return { transfers: Number(r.transfers ?? 0), tracking: Number(r.tracking ?? 0), inflows: Number(r.inflows ?? 0) };
+  }
+
+  /**
+   * What came in and what went out, per month that has either in range. `income` is the income
+   * lines' sum, which is Inflow: Ready to Assign's own activity; `spent` is the spending rule's;
+   * `toTracking` is the part of `spent` that moved to a tracking account. Income plus spending is
+   * exactly what the on-budget accounts grew by: the only other lines on them are transfers between
+   * them, and those cancel out.
+   */
+  cashFlowByMonth(budgetId: string, filter: DateFilter = {}): CashFlowMonth[] {
+    const { where, params } = spendingWhere(budgetId, filter);
+    const sql = `
+      WITH lines AS (${LINES_CTE})
+      SELECT SUBSTR(l.date, 1, 7) AS month,
+             COALESCE(SUM(CASE WHEN ${INCOME_RULE} THEN l.amount END), 0) AS income,
+             COALESCE(SUM(CASE WHEN ${SPENDING_RULE} THEN l.amount END), 0) AS spent,
+             COALESCE(SUM(CASE WHEN ${SPENDING_RULE} AND ${TRACKING_TRANSFER} THEN l.amount END), 0) AS to_tracking
+      ${SPENDING_FROM}
+      WHERE ${[`(${INCOME_RULE} OR ${SPENDING_RULE})`, ...where].join(" AND ")}
+      GROUP BY month
+      ORDER BY month`;
+    return this.stmt(sql)
+      .all(params)
+      .map((r) => ({ month: r.month as string, income: Number(r.income), spent: Number(r.spent), toTracking: Number(r.to_tracking) }));
+  }
+
+  /**
+   * The income lines in range summed per payee, largest first: who the money came from. Lines with
+   * no payee share one `(no payee)` bucket.
+   */
+  incomeBySource(budgetId: string, filter: DateFilter = {}): FlowAggregate[] {
+    const { where, params } = spendingWhere(budgetId, filter);
+    const sql = `
+      WITH lines AS (${LINES_CTE})
+      SELECT p.id AS key, COALESCE(p.name, '(no payee)') AS name, COUNT(*) AS count, SUM(l.amount) AS amount,
+             COUNT(DISTINCT SUBSTR(l.date, 1, 7)) AS months
+      ${SPENDING_FROM}
+      WHERE ${[INCOME_RULE, ...where].join(" AND ")}
+      GROUP BY p.id, p.name
+      ORDER BY amount DESC, name ASC`;
+    return this.stmt(sql).all(params).map(toFlowAggregate);
+  }
+
+  /**
+   * The spending lines in range that moved money to a tracking account, summed per account, most
+   * moved first (the sums are negative, so ascending).
+   */
+  trackingTransfers(budgetId: string, filter: DateFilter = {}): FlowAggregate[] {
+    const { where, params } = spendingWhere(budgetId, filter);
+    const sql = `
+      WITH lines AS (${LINES_CTE})
+      SELECT l.transfer_account_id AS key, dest.name AS name, COUNT(*) AS count, SUM(l.amount) AS amount,
+             COUNT(DISTINCT SUBSTR(l.date, 1, 7)) AS months
+      ${SPENDING_FROM}
+      JOIN accounts dest ON dest.budget_id = $b AND dest.id = l.transfer_account_id
+      WHERE ${[SPENDING_RULE, TRACKING_TRANSFER, ...where].join(" AND ")}
+      GROUP BY l.transfer_account_id, dest.name
+      ORDER BY amount ASC, name ASC`;
+    return this.stmt(sql).all(params).map(toFlowAggregate);
   }
 
   /**
@@ -1452,6 +1539,21 @@ const SPENDING_RULE = `((c.id IS NOT NULL AND c.internal = 0)
         OR (l.category_id IS NOT NULL AND c.id IS NULL))`;
 
 /**
+ * A line of income: one in an internal category, which on a budget account means Inflow: Ready to
+ * Assign, since an uncategorized line carries no category at all rather than YNAB's internal
+ * `Uncategorized`. The spending rule's `inflows` exclusion reads this same test, so what the
+ * spending reports drop as an inflow is exactly what the cash flow counts as income.
+ */
+const INCOME_RULE = `COALESCE(c.internal, 0) = 1`;
+
+/**
+ * A line that moves money to a tracking account: a loan or mortgage payment, an investment
+ * contribution. It is spending, since the money leaves the budget, but it stays in net worth, which
+ * is why the cash flow names it apart.
+ */
+const TRACKING_TRANSFER = `EXISTS (SELECT 1 FROM accounts ta WHERE ta.budget_id = $b AND ta.id = l.transfer_account_id AND ta.on_budget = 0)`;
+
+/**
  * A spending line always has a category name to show. Note the budget's own internal `Uncategorized`
  * category is not this bucket — a line carrying it is an inflow-style internal line and never gets
  * here; this is for `category_id IS NULL`.
@@ -1668,6 +1770,16 @@ function candidates(rows: EntityRow[]): string {
   const named = sorted.slice(0, MAX_CANDIDATES).map((m) => `${m.name} (${m.id})`);
   if (sorted.length > MAX_CANDIDATES) named.push(`and ${sorted.length - MAX_CANDIDATES} more`);
   return named.join(", ");
+}
+
+function toFlowAggregate(r: Record<string, unknown>): FlowAggregate {
+  return {
+    key: (r.key as string | null) ?? null,
+    name: r.name as string,
+    count: Number(r.count),
+    amount: Number(r.amount),
+    months: Number(r.months),
+  };
 }
 
 function toTransactionLine(r: Record<string, unknown>): TransactionLine {

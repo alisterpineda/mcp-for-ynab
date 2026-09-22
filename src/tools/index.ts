@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { BudgetStore } from "../cache/store.js";
 import { registerBudgetVsActual } from "./budget-vs-actual.js";
+import { registerCashFlow } from "./cash-flow.js";
 import { registerGetMonth } from "./get-month.js";
 import { registerListAccounts } from "./list-accounts.js";
 import { registerListCategories } from "./list-categories.js";
@@ -15,6 +16,7 @@ export function registerTools(server: McpServer, store: BudgetStore): void {
   registerListCategories(server, store);
   registerListAccounts(server, store);
   registerGetMonth(server, store);
+  registerCashFlow(server, store);
   registerSpendingBreakdown(server, store);
   registerSpendingTrend(server, store);
   registerSearchTransactions(server, store);

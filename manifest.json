@@ -65,6 +65,10 @@
       "description": "One month's income, assigned, activity, Ready to Assign and age of money, plus a per-category table with group subtotals."
     },
     {
+      "name": "cash_flow",
+      "description": "Income, spending and savings month by month, with the savings rate, averages and medians, income by source and what moved to tracking accounts."
+    },
+    {
       "name": "spending_breakdown",
       "description": "Spending over a date range grouped by category, category group, payee, account or month, with shares, an `other` remainder and what the rule excluded."
     },

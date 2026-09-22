@@ -41,9 +41,9 @@ and cannot be triggered from the API.
 All the tools answer from the local cache and return compact JSON: amounts are bare
 numbers in the currency named once in the response envelope, the keys use YNAB's own words
 (`assigned`, `available`, `ready_to_assign`), and the listings are ordered alphabetically rather
-than in YNAB's on-screen order, which the API does not expose. Four exceptions: `list_accounts`
-groups accounts by type first and orders by name inside each group, `spending_breakdown` sorts
-its rows by amount spent, `search_transactions` returns its rows newest first, and
+than in YNAB's on-screen order, which the API does not expose. Five exceptions: `list_accounts`
+groups accounts by type first and orders by name inside each group, `cash_flow` lists its months
+in order and its income sources by amount, `spending_breakdown` sorts its rows by amount spent, `search_transactions` returns its rows newest first, and
 `budget_vs_actual` puts the most overspent categories first, by amount.
 
 - `list_categories` — what exists and what it is for: category groups and categories with their
@@ -60,6 +60,23 @@ its rows by amount spent, `search_transactions` returns its rows newest first, a
   Categories that are zero on all three figures are counted in `categories_omitted` instead of
   listed. `month` is `YYYY-MM` and defaults to the current month; `refresh: true` pulls from YNAB
   first. Deliberately carries no ids.
+- `cash_flow` — are we saving: one row per month with `income`, `spent`, `saved` (income minus
+  spent) and `savings_rate`, followed by `total`, `average` and `median` over the complete months.
+  `income` is every line on an on-budget account in Inflow: Ready to Assign, which is that
+  category's own activity; it can exceed `get_month`'s `income`, which leaves out some inflows
+  that land on credit cards. YNAB files a new account's positive starting balance there too, so
+  an account opened in the window counts its balance as income and as saved; for a budget's first
+  month that can be most of its net worth. `spent` is `spending_breakdown`'s total, so money received into a
+  spending category (a tax refund kept in its own category) lowers `spent` rather than raising
+  `income`. `to_tracking_accounts` is the part of `spent` that moved to tracking accounts (loan
+  and mortgage payments, investment contributions), so a reader who counts those as saving adds
+  it back. `saved` is exactly what the on-budget accounts grew by. The averages add up; each median is its own column's.
+  `income_sources` sums the income by payee, largest first, with `months_active` to tell a
+  paycheque from a one-off (past 25, the rest is summed in `income_sources_other`), and
+  `tracking_accounts` does the same for the money moved to each tracking account. The window
+  works like `spending_trend`'s: six months ending at the current one, `months` or `start`/`end`
+  to change it, cut at the budget's first month, and the current month flagged `partial` and
+  left out of the summaries unless `include_partial` is set.
 - `spending_breakdown` — where the money went: spending over a date range grouped by `category` (the
   default), `category_group`, `payee`, `account` or `month`. Each row carries `spent`, the line
   `count` and its `share` of the total; rows past the cap (25, or `limit`) are summed into `other`,
@@ -118,6 +135,8 @@ uses an in-memory database, and costs four API requests (budget list, full sync,
 an invalid-token check). On that sync it also proves the spending rule against the real budget:
 for every cached month and category, the spending lines add up to the `activity` YNAB reports,
 every line lands in exactly one of spending, transfer, tracking or inflow, the uncategorized lines
-add up to YNAB's own Uncategorized activity, and every real name resolves back to its own id. Copy `.env.example` to `.env`
+add up to YNAB's own Uncategorized activity, the cash flow's income is Ready to Assign's activity
+and its income plus spending is what the on-budget accounts grew by, and every real name resolves
+back to its own id. Copy `.env.example` to `.env`
 and fill in your token; `npm test` loads it automatically. `.env` is git-ignored. Set
 `YNAB_BUDGET_ID` as well to test a budget other than your default one.

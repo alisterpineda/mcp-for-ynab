@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { MonthlySpending } from "../cache/db.js";
 import type { BudgetStore } from "../cache/store.js";
-import { currentMonth, dateRange, historyStart, MAX_MONTHS, monthWindow } from "./dates.js";
+import { historyStart, historyWindow, MAX_MONTHS, monthWindow } from "./dates.js";
 import { REFRESH, respond, SHARED_NOTES, ToolError, type Report, type ToolContext } from "./envelope.js";
 import { BY_ID_OR_NAME, resolveFilters } from "./filters.js";
 
@@ -69,24 +69,13 @@ function buildTrend(context: ToolContext, args: TrendArgs): Report {
     ...(resolved.echo?.groups ?? []).map(({ id, name }) => ({ id, name, kind: "category_group" as const })),
   ];
 
-  const asked = monthWindow(args.months, args.start, args.end);
-  const last = asked[asked.length - 1];
-  // A month that has not started has no spending to trend, and a zero for it would read as a
-  // month of spending nothing — so a window past the current month is refused, not zero-filled.
-  if (last > currentMonth()) {
-    throw new ToolError(`The window ends at ${last}, after the current month ${currentMonth()}; there is no spending to trend there yet.`);
-  }
-  // The same holds at the other end: a month before the budget existed is cut from the window, and
-  // the response says where the history starts so a shorter series is not read as the one asked for.
-  const floor = historyStart(context.budget.firstMonth, context.db.earliestDate(budgetId));
-  const months = floor === null ? asked : asked.filter((month) => month >= floor);
-  if (months.length === 0) {
-    throw new ToolError(`The budget's history starts at ${floor}, after the window's end ${last}; there is no spending to trend there.`);
-  }
-  const first = months[0];
-  // The months are whole, so the range is the first day of the first to the last day of the last.
-  const { from, to } = dateRange(first, last);
-  const partialMonth = months.includes(currentMonth()) ? currentMonth() : null;
+  // A window cut at the budget's first month says where the history starts, so a shorter series is
+  // not read as the one asked for.
+  const window = historyWindow(
+    monthWindow(args.months, args.start, args.end),
+    historyStart(context.budget.firstMonth, context.db.earliestDate(budgetId)),
+  );
+  const { months, from, to, partialMonth } = window;
 
   // One pass over the lines per kind, however many series were asked for: the flatten and the
   // spending rule cost the same for one category as for twenty.
@@ -94,8 +83,8 @@ function buildTrend(context: ToolContext, args: TrendArgs): Report {
   if (categoryIds.length > 0) index(found, context.db.spendingByMonth(budgetId, "category", { from, to, categoryIds }));
   if (groupIds.length > 0) index(found, context.db.spendingByMonth(budgetId, "category_group", { from, to, groupIds }));
 
-  const body: Report = { start: first, end: last };
-  if (months.length < asked.length) body.history_starts = first;
+  const body: Report = { start: months[0], end: months[months.length - 1] };
+  if (window.cut) body.history_starts = months[0];
   if (partialMonth) body.partial_month = partialMonth;
   body.series = specs.map((spec) =>
     buildSeries(context, spec, found.get(spec.id) ?? new Map(), months, partialMonth, args.include_partial === true),
