@@ -271,7 +271,9 @@ export function monthCategory(id: string, overrides: Partial<Category> = {}): Ca
  * is only in July (YNAB would post it to the internal `Uncategorized` category, which the fixture
  * leaves at zero, so July's total is 25,000 more than its non-internal `month_categories` sum —
  * use August or September for a reconciliation assertion), and the credit-card payment category
- * `c5` carries assignments but no activity, because the payments themselves are transfers.
+ * `c5` carries the activity YNAB would compute for it — card spending moved in minus payments out
+ * (July 27,000 - 50,000, August 45,000 - 60,000, September 14,000 - 70,000) — which no spending
+ * line carries, so every reconciliation leaves that category out.
  *
  * Balances follow `budgeted + activity` carried forward, with an overspent balance reset to zero
  * at the next month's start. Groceries is over-assigned in July (50,000 spent against 40,000
@@ -330,7 +332,7 @@ export function spendingBudget(overrides: Partial<BudgetDetail> = {}): BudgetDet
           monthCategory("c2", { budgeted: 30_000, activity: -30_000, balance: 0 }),
           monthCategory("c3", { budgeted: 40_000, activity: -32_000, balance: 8_000 }),
           monthCategory("c4", { budgeted: 150_000, activity: -150_000, balance: 0 }),
-          monthCategory("c5", { budgeted: 50_000, activity: 0, balance: 50_000 }),
+          monthCategory("c5", { budgeted: 50_000, activity: -23_000, balance: 27_000 }),
           monthCategory("c6", { activity: 500_000 }),
           monthCategory("c7"),
           monthCategory("c8", { budgeted: 15_000, activity: -15_000, balance: 0 }),
@@ -346,7 +348,7 @@ export function spendingBudget(overrides: Partial<BudgetDetail> = {}): BudgetDet
           monthCategory("c2", { budgeted: 30_000, activity: -30_000, balance: 0 }),
           monthCategory("c3", { budgeted: 20_000, activity: -18_000, balance: 10_000 }),
           monthCategory("c4", { budgeted: 150_000, activity: -150_000, balance: 0 }),
-          monthCategory("c5", { budgeted: 50_000, activity: 0, balance: 100_000 }),
+          monthCategory("c5", { budgeted: 50_000, activity: -15_000, balance: 62_000 }),
           monthCategory("c6", { activity: 500_000 }),
           monthCategory("c7"),
           monthCategory("c8"),
@@ -362,7 +364,7 @@ export function spendingBudget(overrides: Partial<BudgetDetail> = {}): BudgetDet
           monthCategory("c2", { budgeted: 40_000, activity: -40_000, balance: 0 }),
           monthCategory("c3", { budgeted: 20_000, activity: -14_000, balance: 16_000 }),
           monthCategory("c4", { budgeted: 150_000, activity: -150_000, balance: 0 }),
-          monthCategory("c5", { budgeted: 50_000, activity: 0, balance: 150_000 }),
+          monthCategory("c5", { budgeted: 50_000, activity: -56_000, balance: 56_000 }),
           monthCategory("c6", { activity: 500_000 }),
           monthCategory("c7"),
           monthCategory("c8"),

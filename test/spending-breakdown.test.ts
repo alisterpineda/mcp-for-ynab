@@ -40,8 +40,10 @@ describe("spending_breakdown", () => {
   it("equals YNAB's own month figures: the total is minus the month's category activity", async () => {
     await using h = await spending();
     const body = await h.json("spending_breakdown", { start: "2026-08", end: "2026-08" });
-    const detail = h.db.monthDetail(BUDGET_ID, "2026-08-01")!;
-    const activity = detail.categories.reduce((sum, c) => sum + c.activity, 0);
+    // The credit card payment category is left out: its YNAB activity is card spending moved in
+    // minus payments out, not spending, and the breakdown never counts it.
+    const rows = h.db.monthCategoryRange(BUDGET_ID, ["2026-08"]).filter((c) => !c.creditCardPayment);
+    const activity = rows.reduce((sum, c) => sum + c.activity, 0);
     assert.equal(body.total, -activity / 1000);
   });
 

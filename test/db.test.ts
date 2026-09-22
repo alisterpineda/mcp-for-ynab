@@ -821,8 +821,14 @@ describe("the spending rule against YNAB's own month figures", () => {
         if (line.categoryId === null) continue; // YNAB has no month row for the uncategorized bucket.
         summed.set(line.categoryId, (summed.get(line.categoryId) ?? 0) + line.amount);
       }
-      // `monthDetail` already leaves the internal categories out, which is exactly what the rule does.
-      for (const row of db.monthDetail(BUDGET_ID, `${month}-01`)!.categories) {
+      // `monthCategoryRange` already leaves the internal categories out, which is exactly what the
+      // rule does. Credit card payment categories are excluded by construction: YNAB computes their
+      // activity as card spending moved in minus payments out, which no transaction line carries.
+      for (const row of db.monthCategoryRange(BUDGET_ID, [month])) {
+        if (row.creditCardPayment) {
+          summed.delete(row.categoryId);
+          continue;
+        }
         assert.equal(row.activity, summed.get(row.categoryId) ?? 0, `${month} ${row.name} activity`);
         summed.delete(row.categoryId);
       }

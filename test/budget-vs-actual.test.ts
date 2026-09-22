@@ -76,7 +76,7 @@ describe("budget_vs_actual", () => {
     const body = await h.json("budget_vs_actual", PAST);
     assert.deepEqual(
       rowsOf(body).map((row) => row.name),
-      ["Groceries", "(deleted category)", "Mortgage", "Household", "Dining Out", "Old hobby", "Visa"],
+      ["Groceries", "(deleted category)", "Mortgage", "Household", "Dining Out", "Visa", "Old hobby"],
     );
     // The deleted category was overspent in July too, and it spent less than Groceries did.
     assert.deepEqual(
@@ -104,9 +104,10 @@ describe("budget_vs_actual", () => {
       id: "c5",
       name: "Visa",
       group: "Credit Card Payments",
+      // Card spending moved in minus payments out: July -23,000, August -15,000.
       assigned: 100,
-      activity: 0,
-      available: 100,
+      activity: -38,
+      available: 62,
       overspent_months: 0,
       over_assigned_months: 0,
       credit_card_payment: true,

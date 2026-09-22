@@ -37,6 +37,7 @@ describe("YNAB API (live)", { skip: token ? false : "YNAB_ACCESS_TOKEN not set" 
       assert.ok(db.budgetRow(budget.id)!.serverKnowledge! >= budget.serverKnowledge);
 
       assertOrientation(db, budget);
+      assertSpending(db, budget);
     } finally {
       db.close();
     }
@@ -94,4 +95,84 @@ function assertOrientation(db: BudgetDb, budget: SyncedBudget): void {
   });
   assert.equal(summed.budgeted, detail.budgeted, "group subtotals add up to the month's assigned");
   assert.equal(summed.activity, detail.activity, "and to the month's activity");
+}
+
+/**
+ * The spending rule, checked against YNAB's own arithmetic on a real budget: what the spending
+ * queries add up per category and month must be exactly the `activity` YNAB reports for that
+ * category and month, every line must land in exactly one bucket (spending, transfer, tracking or
+ * inflow), and every real name must resolve back to its own id. The synthetic fixture proves the
+ * rule on each edge case; this proves it on the cases the fixture did not think of.
+ */
+function assertSpending(db: BudgetDb, budget: SyncedBudget): void {
+  const months = cachedMonths(db, budget.id);
+  assert.ok(months.length > 0, "a real budget has cached months");
+
+  for (const month of months) {
+    const range = { from: `${month}-01`, to: `${month}-31` };
+
+    // Per category: the lines add up to what YNAB says the category did. Credit card payment
+    // categories are the one exception by construction: YNAB computes their activity as card
+    // spending moved in minus payments out, which no transaction line carries.
+    const byCategory = new Map<string, number>();
+    for (const line of db.spendingLines(budget.id, range)) {
+      if (line.categoryId === null) continue; // YNAB carries uncategorized lines in its own internal row.
+      byCategory.set(line.categoryId, (byCategory.get(line.categoryId) ?? 0) + line.amount);
+    }
+    for (const row of db.monthCategoryRange(budget.id, [month])) {
+      if (row.creditCardPayment) {
+        byCategory.delete(row.categoryId);
+        continue;
+      }
+      assert.equal(byCategory.get(row.categoryId) ?? 0, row.activity, `${month} ${row.name}: spending lines vs YNAB activity`);
+      byCategory.delete(row.categoryId);
+    }
+    assert.deepEqual([...byCategory.keys()], [], `${month}: spending in categories the month does not report`);
+
+    // The aggregates agree with the lines, and with each other.
+    const total = db.spendingTotal(budget.id, range);
+    for (const groupBy of ["category", "category_group", "payee", "account", "month"] as const) {
+      const rows = db.spendingBy(budget.id, groupBy, range);
+      assert.equal(sum(rows.map((r) => r.spent)), total.spent, `${month} by ${groupBy}: rows sum to the total`);
+      assert.equal(sum(rows.map((r) => r.count)), total.count, `${month} by ${groupBy}: counts sum to the total`);
+    }
+
+    // Every flattened line is exactly one of: spending, transfer, tracking, inflow.
+    const excluded = db.spendingExclusions(budget.id, range);
+    const all = db.searchTotal(budget.id, range).count;
+    assert.equal(total.count + excluded.transfers + excluded.tracking + excluded.inflows, all, `${month}: every line lands in one bucket`);
+  }
+
+  // Every real name resolves back to its own id, so the tools' name filters reach every entity.
+  for (const [kind, rows] of [
+    ["categories", db.categoryTree(budget.id, { includeHidden: true }).flatMap((g) => g.categories)],
+    ["accounts", db.accountRows(budget.id, { includeClosed: true }).accounts],
+  ] as const) {
+    for (const row of rows) {
+      const ids = db.entityLabels(budget.id, kind, [row.id]);
+      assert.equal(ids.get(row.id), row.name, `${kind}: ${row.id} is labelled by its own name`);
+      const resolved = db.resolveEntities(budget.id, { [kind]: [row.id] });
+      assert.deepEqual(Object.values(resolved)[0], [row.id], `${kind}: ${row.id} resolves to itself`);
+    }
+  }
+}
+
+/** The `YYYY-MM` keys of every month the cache holds for a budget, oldest first. */
+function cachedMonths(db: BudgetDb, budgetId: string): string[] {
+  const keys: string[] = [];
+  const row = db.budgetRow(budgetId)!;
+  for (let month = row.firstMonth!.slice(0, 7); month <= row.lastMonth!.slice(0, 7); month = next(month)) {
+    if (db.month(budgetId, `${month}-01`)) keys.push(month);
+  }
+  return keys;
+}
+
+function next(month: string): string {
+  const [year, m] = month.split("-").map(Number);
+  const shifted = new Date(Date.UTC(year, m, 1));
+  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+function sum(values: number[]): number {
+  return values.reduce((total, value) => total + value, 0);
 }

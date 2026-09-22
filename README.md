@@ -99,15 +99,9 @@ against an in-memory fake of the YNAB API. They need no credentials.
 
 The live test in `test/integration/` runs only when `YNAB_ACCESS_TOKEN` is set. It is read-only,
 uses an in-memory database, and costs four API requests (budget list, full sync, delta sync, and
-an invalid-token check). Copy `.env.example` to `.env`
+an invalid-token check). On that sync it also proves the spending rule against the real budget:
+for every cached month and category, the spending lines add up to the `activity` YNAB reports,
+every line lands in exactly one of spending, transfer, tracking or inflow, and every real name
+resolves back to its own id. Copy `.env.example` to `.env`
 and fill in your token; `npm test` loads it automatically. `.env` is git-ignored. Set
 `YNAB_BUDGET_ID` as well to test a budget other than your default one.
-
-### Reconciliation
-
-`npm run reconcile -- --from 2026-07 --to 2026-09` prints the spending breakdown per month, per
-category, from the real on-disk cache, so the totals can be compared to YNAB's own Spending report
-by hand. It is not a test and `npm test` never runs it: it asserts nothing and never syncs. It
-writes nothing but the schema, which means a cache from an older build is emptied on open and
-has to be synced again by the server before there is anything to reconcile. The range defaults
-to the last three months, and `--budget <id>` picks a budget other than the active one.
