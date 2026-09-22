@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { BudgetDb, type SyncedBudget } from "../../src/cache/db.js";
 import { BudgetStore } from "../../src/cache/store.js";
+import { isKnownCadence } from "../../src/tools/list-categories.js";
 import { FREQUENCIES } from "../../src/tools/list-scheduled.js";
 import { YnabApiError, YnabClient } from "../../src/ynab/client.js";
 
@@ -68,6 +69,10 @@ function assertOrientation(db: BudgetDb, budget: SyncedBudget): void {
     groups.every((g) => g.name.length > 0 && g.name !== "(unknown group)" && g.categories.length > 0),
     "every category resolves to a named group, and no group comes back empty",
   );
+  // Every goal period the real budget uses has words, so no target reaches Claude without its period.
+  for (const c of categories) {
+    assert.ok(isKnownCadence(c.goalCadence), `${c.name}: goal cadence ${c.goalCadence} has words`);
+  }
 
   const accounts = db.accountRows(budget.id, { includeClosed: true }).accounts;
   assert.ok(accounts.length > 0, "a real budget has accounts");
@@ -116,9 +121,10 @@ function assertSpending(db: BudgetDb, budget: SyncedBudget): void {
     // categories are the one exception by construction: YNAB computes their activity as card
     // spending moved in minus payments out, which no transaction line carries.
     const byCategory = new Map<string, number>();
+    let uncategorizedSpending = 0; // YNAB carries these in its own internal row, checked below.
     for (const line of db.spendingLines(budget.id, range)) {
-      if (line.categoryId === null) continue; // YNAB carries uncategorized lines in its own internal row.
-      byCategory.set(line.categoryId, (byCategory.get(line.categoryId) ?? 0) + line.amount);
+      if (line.categoryId === null) uncategorizedSpending += line.amount;
+      else byCategory.set(line.categoryId, (byCategory.get(line.categoryId) ?? 0) + line.amount);
     }
     for (const row of db.monthCategoryRange(budget.id, [month])) {
       if (row.creditCardPayment) {
@@ -144,11 +150,13 @@ function assertSpending(db: BudgetDb, budget: SyncedBudget): void {
     assert.equal(total.count + excluded.transfers + excluded.tracking + excluded.inflows, all, `${month}: every line lands in one bucket`);
 
     // The lines the search calls uncategorized are the ones YNAB posts to its own internal
-    // Uncategorized category, so their sum is that category's activity for the month.
+    // Uncategorized category, so their sum is that category's activity for the month — and so is
+    // the spending report's Uncategorized bucket, or the report comes in under YNAB's.
     const uncategorized = db.searchTotal(budget.id, { ...range, uncategorized: true });
     const [uncategorizedId] = db.resolveEntities(budget.id, { categories: ["Uncategorized"] }).categoryIds!;
     const reported = db.monthCategories(budget.id, `${month}-01`).find((row) => row.categoryId === uncategorizedId)?.activity ?? 0;
     assert.equal(uncategorized.sum, reported, `${month}: uncategorized lines vs YNAB's Uncategorized activity`);
+    assert.equal(uncategorizedSpending, reported, `${month}: the Uncategorized spending bucket vs YNAB's Uncategorized activity`);
   }
 
   // Every scheduled transaction lands on a cached account with a frequency the tool can rate.

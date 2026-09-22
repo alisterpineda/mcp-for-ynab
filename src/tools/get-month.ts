@@ -2,17 +2,13 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { MonthCategoryDetail, MonthDetail } from "../cache/db.js";
 import type { BudgetStore } from "../cache/store.js";
-import { ALPHABETICAL_ORDER, respond, SHARED_NOTES, ToolError, type Report, type ToolContext } from "./envelope.js";
+import { ALPHABETICAL_ORDER, REFRESH, respond, SHARED_NOTES, ToolError, type Report, type ToolContext } from "./envelope.js";
 
 const description = `Report one month of the budget: how much came in, how much was assigned, what was spent, and what is still available in each category. This is the tool for "how are we doing this month?" and for "how much is left for groceries?".
 
-The header carries \`income\`, \`assigned\`, \`activity\` (spending, so normally negative), \`ready_to_assign\` (money with no job yet), \`age_of_money\` and the month's \`note\` when it has one. Categories nest under their group, and each group carries its own \`assigned\`, \`activity\` and \`available\` subtotals, already added up — the rows sum to the group subtotals and the subtotals to the header, so an answer can be reconciled without doing the arithmetic. \`underfunded\` on a category is what YNAB still wants assigned to it this month to stay on track with its goal.
+The header carries \`income\`, \`assigned\`, \`activity\` (spending, so normally negative), \`ready_to_assign\` (money with no job yet), \`age_of_money\` and the month's \`note\` when it has one. Categories nest under their group, and each group carries its own \`assigned\`, \`activity\` and \`available\` subtotals, already added up: the rows sum to the subtotals and the subtotals to the header, so an answer reconciles without doing the arithmetic. \`underfunded\` on a category is what YNAB still wants assigned to it this month to stay on track with its goal.
 
-Categories where assigned, activity and available are all zero are left out and counted in \`categories_omitted\`, so the list is shorter than the budget. A category hidden in YNAB still appears when it has figures, marked \`hidden\`.
-
-\`month\` is \`YYYY-MM\` and defaults to the current month; past and future months both work. Asking for a month outside the budget's history is an error naming the range; a month inside it that YNAB has not filled in yet reports zeroes with a \`status\` line saying so. Use \`refresh: true\` when the user says they just changed something in YNAB — the report tools whose numbers move that way offer it (\`sync_status\` has it too, but for cache health rather than for an answer).
-
-This report deliberately carries no ids. To act on a particular category later, get its id from \`list_categories\`.
+Categories that are zero on all three figures are left out and counted in \`categories_omitted\`; a category hidden in YNAB still appears when it has figures, marked \`hidden\`. Past and future months both work: a month outside the budget's history is an error naming the range, and one YNAB has not filled in yet reports zeroes with a \`status\` saying so.
 
 ${SHARED_NOTES} ${ALPHABETICAL_ORDER}`;
 
@@ -24,7 +20,7 @@ export function registerGetMonth(server: McpServer, store: BudgetStore): void {
       description,
       inputSchema: {
         month: z.string().optional().describe("The month as `YYYY-MM` (a `YYYY-MM-01` date is accepted too). Defaults to the current month."),
-        refresh: z.boolean().optional().describe("Pull the latest changes from YNAB before reporting, even if the cache is recent."),
+        refresh: z.boolean().optional().describe(REFRESH),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },

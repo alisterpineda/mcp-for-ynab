@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import { BudgetDb } from "../src/cache/db.js";
 import { BudgetStore } from "../src/cache/store.js";
 import { renderStatus } from "../src/tools/sync-status.js";
+import { YnabApiError } from "../src/ynab/client.js";
 import { BUDGET_ID, FakeBudgetSource } from "./fixtures.js";
 import { harness } from "./mcp.js";
 
@@ -77,6 +78,21 @@ describe("the sync_status tool", () => {
     assert.equal(isError, false);
     assert.equal(h.source.calls.at(-1)?.knowledge, undefined, "full_resync must ask YNAB for everything, not for changes");
     assert.equal(h.db.summary(BUDGET_ID).accounts, 4, "and the cache is rebuilt, not left empty");
+  });
+
+  it("keeps answering from the cache when full_resync cannot reach YNAB, and says so", async () => {
+    await using h = await harness();
+    await h.json("list_accounts");
+    h.source.fail = new YnabApiError("YNAB API 429: Too Many Requests", 429);
+
+    const { text, isError } = await h.call("sync_status", { full_resync: true });
+    assert.equal(isError, false, text);
+    assert.match(text, /Last sync attempt failed: YNAB API 429/);
+    assert.match(text, /showing the last successful sync/);
+
+    const accounts = await h.json("list_accounts");
+    assert.match(String(accounts.warning), /rate limit/, "the other tools still answer, flagged stale");
+    assert.equal(h.db.summary(BUDGET_ID).accounts, 4);
   });
 
   it("asks only for the changes on a plain refresh", async () => {

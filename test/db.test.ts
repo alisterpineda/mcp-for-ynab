@@ -161,19 +161,28 @@ describe("BudgetDb with several budgets", () => {
     );
   });
 
-  it("clearBudget empties one budget only and forgets its knowledge", () => {
+  it("a replacing apply swaps one budget's rows for the new copy and leaves the other budget alone", () => {
     const db = synced();
     db.applyBudget("budget-2", budgetDetail({ id: "budget-2", name: "Business", transactions: [transaction("b1", "2026-09-01", -1)] }), 3, LATER);
-    db.clearBudget(BUDGET_ID);
-    const cleared = db.budgetRow(BUDGET_ID)!;
-    assert.equal(cleared.name, "Household", "the budget row itself stays");
-    assert.equal(cleared.serverKnowledge, null);
-    assert.equal(cleared.lastSyncedAt, null);
-    assert.equal(db.summary(BUDGET_ID).transactions, 0);
+    db.applyBudget(BUDGET_ID, budgetDetail({ transactions: [transaction("t9", "2026-09-20", -1)] }), 20, LATER, { replace: true });
+    const replaced = db.budgetRow(BUDGET_ID)!;
+    assert.equal(replaced.name, "Household");
+    assert.equal(replaced.serverKnowledge, 20);
+    assert.equal(replaced.lastSyncedAt, LATER.toISOString());
+    assert.equal(db.summary(BUDGET_ID).transactions, 1, "only what the new copy holds");
     assert.equal(db.summary(BUDGET_ID).months, 0);
     assert.deepEqual(db.monthCategories(BUDGET_ID, "2026-09-01"), []);
     assert.equal(db.summary("budget-2").transactions, 1);
     assert.equal(db.budgetRow("budget-2")?.serverKnowledge, 3);
+  });
+
+  it("a replacing apply that fails keeps the copy it was replacing", () => {
+    const db = synced();
+    // A payload that breaks part-way through the write: after the old rows are deleted, before commit.
+    const broken = budgetDetail({ transactions: [{ ...transaction("t9", "2026-09-20", -1), date: null as unknown as string }] });
+    assert.throws(() => db.applyBudget(BUDGET_ID, broken, 20, LATER, { replace: true }), /NOT NULL/);
+    assert.equal(db.summary(BUDGET_ID).transactions, 3, "the old rows are back");
+    assert.equal(db.budgetRow(BUDGET_ID)?.serverKnowledge, 10);
   });
 
   it("upsertBudgetList records the default flag and preserves synced fields", () => {
@@ -368,6 +377,9 @@ describe("BudgetDb.categoryTree", () => {
       goalTarget: 800_000,
       goalTargetDate: null,
       goalSnoozedAt: null,
+      goalCadence: null,
+      goalCadenceFrequency: null,
+      goalNeedsWholeAmount: null,
       hidden: false,
     });
     assert.equal(food.categories.find((c) => c.name === "Café")?.goalSnoozedAt, "2026-09-01T00:00:00+00:00");
@@ -482,7 +494,16 @@ describe("BudgetDb.monthDetail", () => {
 describe("the cache schema", () => {
   it("carries the orientation columns", () => {
     const ddl = schemaDdl();
-    for (const column of ["internal INTEGER NOT NULL", "goal_type TEXT", "goal_target INTEGER", "goal_target_date TEXT", "goal_snoozed_at TEXT"]) {
+    for (const column of [
+      "internal INTEGER NOT NULL",
+      "goal_type TEXT",
+      "goal_target INTEGER",
+      "goal_target_date TEXT",
+      "goal_snoozed_at TEXT",
+      "goal_cadence INTEGER",
+      "goal_cadence_frequency INTEGER",
+      "goal_needs_whole_amount INTEGER",
+    ]) {
       assert.ok(ddl.includes(column), `categories has ${column}`);
     }
     for (const column of ["cleared_balance INTEGER NOT NULL", "uncleared_balance INTEGER NOT NULL", "last_reconciled_at TEXT"]) {
@@ -614,7 +635,7 @@ describe("BudgetDb.raw", () => {
     assert.equal(db.raw("budget-2", "transactions", "t1"), null);
   });
 
-  it("follows deletes, month removal and clearBudget", () => {
+  it("follows deletes, month removal and replacement", () => {
     const db = synced();
     db.applyBudget(
       BUDGET_ID,
@@ -634,7 +655,7 @@ describe("BudgetDb.raw", () => {
     assert.equal(db.raw(BUDGET_ID, "month_categories", "2026-09-01/c1"), null, "a removed month takes its category JSON with it");
 
     assert.ok(db.raw(BUDGET_ID, "payees", "p1"));
-    db.clearBudget(BUDGET_ID);
+    db.applyBudget(BUDGET_ID, budgetDetail(), 13, NOW, { replace: true });
     assert.equal(db.raw(BUDGET_ID, "payees", "p1"), null);
   });
 });

@@ -50,5 +50,11 @@ export function resolveFilters(context: ToolContext, names: EntityNames): Resolv
   return Object.keys(echo).length > 0 ? { ids, echo } : { ids };
 }
 
+/**
+ * How every name filter reads what it is given, said on the parameter itself: a tool description
+ * has to fit in the 2,048 characters Claude Code passes on, and a parameter's does not.
+ */
+export const BY_ID_OR_NAME = `By id or name: a whole name first, else a part only one of them contains ("costco" finds "Costco Wholesale"). An ambiguous name is an error listing the candidates.`;
+
 /** The resolver's own kind list, so a kind added there is asked about and echoed here. */
 const KINDS = Object.keys(RESOLVABLE) as (keyof EntityNames)[];

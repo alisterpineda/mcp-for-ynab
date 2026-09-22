@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { currentMonth, dateRange, MAX_MONTHS, monthWindow } from "../src/tools/dates.js";
+import { currentMonth, dateRange, historyStart, MAX_MONTHS, monthWindow } from "../src/tools/dates.js";
 import { ToolError } from "../src/tools/envelope.js";
 
 describe("dateRange", () => {
@@ -112,5 +112,21 @@ describe("currentMonth", () => {
   it("is the machine's local month as YYYY-MM", () => {
     assert.equal(currentMonth(new Date(2026, 8, 22)), "2026-09");
     assert.equal(currentMonth(new Date(2026, 11, 31, 23, 59)), "2026-12");
+  });
+});
+
+describe("historyStart", () => {
+  it("is the budget's first month as YYYY-MM", () => {
+    assert.equal(historyStart("2026-07-01", "2026-07-03"), "2026-07");
+  });
+
+  it("reaches back to a transaction dated before the first budget month", () => {
+    assert.equal(historyStart("2026-07-01", "2026-05-28"), "2026-05");
+  });
+
+  it("uses whichever of the two it has, and is null with neither", () => {
+    assert.equal(historyStart(null, "2026-05-28"), "2026-05");
+    assert.equal(historyStart("2026-07-01", null), "2026-07");
+    assert.equal(historyStart(null, null), null);
   });
 });

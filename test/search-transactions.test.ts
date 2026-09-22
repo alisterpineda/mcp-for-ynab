@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { monthFromNow, spendingBudget, transaction } from "./fixtures.js";
+import { monthFromNow, spendingBudget, subtransaction, transaction } from "./fixtures.js";
 import { harness } from "./mcp.js";
 
 interface Row {
@@ -16,6 +16,8 @@ interface Row {
   cleared: string;
   approved: boolean;
   flag?: string;
+  flag_name?: string;
+  imported_payee?: string;
 }
 
 const rowsOf = (body: Record<string, unknown>): Row[] => body.rows as Row[];
@@ -131,6 +133,110 @@ describe("search_transactions", () => {
     const memo = await h.json("search_transactions", { ...range, text: "blender" });
     assert.deepEqual(idsOf(memo), ["s3"]);
     assert.equal(rowsOf(memo)[0].memo, "returned blender");
+  });
+
+  it("matches text ignoring accents on either side and in every column, and searches for an emoji rather than folding it away", async () => {
+    await using h = await harness({
+      budget: spendingBudget({
+        transactions: [
+          ...spendingBudget().transactions!,
+          transaction("gift", "2026-09-10", -30_000, { memo: "🎁 for mum" }),
+          transaction("creme", "2026-09-10", -6_000, { payee_id: "p8", memo: "crème fraîche" }),
+          transaction("pat", "2026-09-10", -9_000, { payee_id: "p8", import_payee_name_original: "PÂTISSERIE DU COIN" }),
+        ],
+      }),
+    });
+    const range = { start: "2026-07", end: "2026-09" };
+    // SQLite's own LIKE folds ASCII case only, so an accented term has to be folded before it gets there.
+    for (const text of ["cafe", "Café", "CAFÉ"]) {
+      const cafe = await h.json("search_transactions", { ...range, text });
+      assert.deepEqual(idsOf(cafe), ["t11", "t22"], `Café Luna, found by "${text}"`);
+    }
+    const memo = await h.json("search_transactions", { ...range, text: "creme" });
+    assert.deepEqual(idsOf(memo), ["creme"], "an accented memo, typed without its accent");
+    const imported = await h.json("search_transactions", { ...range, text: "patisserie" });
+    assert.deepEqual(idsOf(imported), ["pat"], "an accented bank name, typed without its accent");
+    const gift = await h.json("search_transactions", { ...range, text: "🎁" });
+    assert.deepEqual(idsOf(gift), ["gift"], "an emoji-only term is not a term that matches everything");
+    for (const text of ["^", "´", "́"]) {
+      const bare = await h.json("search_transactions", { ...range, text });
+      assert.equal(bare.count, 0, `${JSON.stringify(text)} folds away to nothing, which matches nothing rather than everything`);
+    }
+  });
+
+  it("keeps the bank's name when YNAB sent only its cleaned-up one, and on every line of a split", async () => {
+    await using h = await harness({
+      budget: spendingBudget({
+        transactions: [
+          ...spendingBudget().transactions!,
+          transaction("cleaned", "2026-09-11", -12_000, { payee_id: "p8", import_payee_name: "FARMERS MKT 0042" }),
+          transaction("receipt", "2026-09-11", -50_000, {
+            payee_id: "p1",
+            category_id: null,
+            import_payee_name_original: "COSTCO WHSE #0123",
+            flag_color: "blue",
+            flag_name: "Receipt kept",
+          }),
+        ],
+        subtransactions: [
+          ...spendingBudget().subtransactions!,
+          subtransaction("r1", "receipt", -30_000, { category_id: "c1" }),
+          subtransaction("r2", "receipt", -20_000, { category_id: "c2" }),
+        ],
+      }),
+    });
+    const range = { start: "2026-09", end: "2026-09" };
+    const cleaned = await h.json("search_transactions", { ...range, text: "0042" });
+    assert.deepEqual(idsOf(cleaned), ["cleaned"], "import_payee_name stands in when there is no original");
+    assert.equal(rowsOf(cleaned)[0].imported_payee, "FARMERS MKT 0042");
+
+    const split = await h.json("search_transactions", { ...range, text: "0123" });
+    assert.deepEqual(idsOf(split), ["r1", "r2"], "each line of the split is found by its parent's statement text");
+    for (const row of rowsOf(split)) {
+      assert.equal(row.parent_id, "receipt");
+      assert.equal(row.imported_payee, "COSTCO WHSE #0123", `${row.id} carries the parent's bank name`);
+      assert.equal(row.flag, "blue");
+      assert.equal(row.flag_name, "Receipt kept", `${row.id} carries the parent's flag name`);
+    }
+  });
+
+  it("finds a charge by the payee the bank sent, and shows that name only when it says something new", async () => {
+    await using h = await harness({
+      budget: spendingBudget({
+        transactions: [
+          ...spendingBudget().transactions!,
+          transaction("sq", "2026-09-11", -43_000, {
+            payee_id: "p3",
+            import_payee_name: "Corner Diner",
+            import_payee_name_original: "SQ *CORNER DINER 4471",
+            flag_color: "red",
+            flag_name: "Reimbursable",
+          }),
+          transaction("same", "2026-09-11", -9_000, { payee_id: "p1", import_payee_name_original: "COSTCO" }),
+          transaction("spaced", "2026-09-11", -7_000, { payee_id: "p3", import_payee_name_original: "CORNER  DINER " }),
+        ],
+      }),
+    });
+    const body = await h.json("search_transactions", { start: "2026-09", end: "2026-09", text: "4471" });
+    assert.deepEqual(idsOf(body), ["sq"], "the statement's text, which appears nowhere YNAB shows it");
+    const [row] = rowsOf(body);
+    assert.equal(row.payee, "Corner Diner");
+    assert.equal(row.imported_payee, "SQ *CORNER DINER 4471", "the original statement text wins over YNAB's cleaned-up import name");
+    assert.equal(row.flag, "red");
+    assert.equal(row.flag_name, "Reimbursable");
+
+    const day = await h.json("search_transactions", { start: "2026-09-11", end: "2026-09-11" });
+    const costco = rowsOf(day).find((r) => r.id === "same")!;
+    assert.ok(!("imported_payee" in costco), "COSTCO beside Costco says nothing new");
+    const spaced = rowsOf(day).find((r) => r.id === "spaced")!;
+    assert.ok(!("imported_payee" in spaced), "nor does the same name in the bank's spacing");
+  });
+
+  it("refuses a min_amount above the max_amount rather than answering with nothing", async () => {
+    await using h = await spending();
+    const { text, isError } = await h.call("search_transactions", { min_amount: 50, max_amount: 20 });
+    assert.equal(isError, true);
+    assert.match(text, /min_amount 50 is more than max_amount 20/);
   });
 
   it("counts and sums every match, even the rows the limit cut", async () => {

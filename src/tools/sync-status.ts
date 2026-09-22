@@ -7,7 +7,7 @@ import { formatAge, formatLocalTime, freshnessLine } from "../freshness.js";
 
 const description = `Report the state of the local YNAB budget cache: budget name, when the data was last synced from YNAB, how many transactions are cached and the date range they cover, and any recent sync problem.
 
-Data is refreshed automatically whenever it is more than a few minutes old, so this tool is rarely needed just to keep numbers current. Use \`refresh: true\` when the user says they just entered or changed something in YNAB and wants it reflected now, or when numbers look stale. Use \`full_resync: true\` only for troubleshooting a cache that seems wrong: it discards the local cache and re-downloads the entire budget.
+Data is refreshed automatically whenever it is more than a few minutes old, so this tool is rarely needed just to keep numbers current. Use \`refresh: true\` when the user says they just entered or changed something in YNAB and wants it reflected now, or when numbers look stale. Use \`full_resync: true\` only for troubleshooting a cache that seems wrong: it re-downloads the entire budget and replaces the local cache with it. If the download fails, the cache is kept and the failure is reported.
 
 Note: this reflects what YNAB has. Bank imports happen inside YNAB (usually when the YNAB app is opened), so a recent purchase can be missing from YNAB itself; refreshing here cannot pull it from the bank.`;
 
@@ -22,7 +22,7 @@ export function registerSyncStatus(server: McpServer, store: BudgetStore): void 
         full_resync: z
           .boolean()
           .optional()
-          .describe("Discard the local cache and download the full budget again. Troubleshooting only."),
+          .describe("Download the full budget again and replace the local cache with it; a failed download keeps the cache. Troubleshooting only."),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },

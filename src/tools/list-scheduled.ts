@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ScheduledLine, ScheduledRow } from "../cache/db.js";
 import type { BudgetStore } from "../cache/store.js";
-import { respond, SHARED_NOTES, type Report, type ToolContext } from "./envelope.js";
+import { REFRESH, respond, SHARED_NOTES, type Report, type ToolContext } from "./envelope.js";
 
 /** A YNAB frequency code in words a person uses, and how many times a year it fires. */
 interface Frequency {
@@ -37,13 +37,18 @@ const RATES = Object.values(FREQUENCIES)
   .map((f) => `${f.words} ${f.perYear}`)
   .join(", ");
 
-const SCOPE = `\`per_month\` is the amount times the frequency's occurrences a year (${RATES}) divided by twelve; a one-off has none. \`outflow_per_month\` adds up the recurring outflows on on-budget accounts, leaving out transfers to another on-budget account, which move money rather than spend it; a split is counted line by line, so only its lines that move money are left out. \`inflow_per_month\` does the same for money coming in. YNAB keeps a scheduled transfer on one account only, so one entered on a tracking account is not counted even when it moves money into the budget.`;
+// The rule's two halves, worded once: `SCOPE` states them in full and the description summarises
+// them (it cannot carry `SCOPE` whole within 2,048 characters), so the two cannot drift apart.
+const RATE_RULE = "the amount times the frequency's occurrences a year";
+const COUNTED = "on on-budget accounts, leaving out transfers to another on-budget account";
+
+const SCOPE = `\`per_month\` is ${RATE_RULE} (${RATES}) divided by twelve; a one-off has none. \`outflow_per_month\` adds up the recurring outflows ${COUNTED}, which move money rather than spend it; a split is counted line by line, so only its lines that move money are left out. \`inflow_per_month\` does the same for money coming in. YNAB keeps a scheduled transfer on one account only, so one entered on a tracking account is not counted even when it moves money into the budget.`;
 
 const description = `What is coming up: every scheduled transaction in the budget, soonest first, with what it will cost a month. This is the tool for "what bills are due before payday?", "what are my fixed monthly costs?" and "when is the next mortgage payment?".
 
-Each row carries \`id\`, \`date_next\`, \`frequency\` in words (monthly, every other week, once…), \`account\`, \`amount\` with YNAB's sign (a bill is negative, a paycheque positive), and \`payee\`, \`category\`, \`group\`, \`memo\` and \`flag\` when it has them. A transfer names the account it moves money to as \`transfer_to\`. A split carries its \`lines\`, each with its own category and amount, and the row's \`amount\` is the whole. A recurring row carries \`per_month\`. ${SCOPE} Rows are ordered by \`date_next\` ascending, so the first rows are what is due soonest.
+Each row carries \`id\`, \`date_next\`, \`frequency\` in words (monthly, every other week, once…), \`account\`, \`amount\` with YNAB's sign (a bill is negative, a paycheque positive), and \`payee\`, \`category\`, \`group\`, \`memo\` and \`flag\` when it has them. A transfer names its other account as \`transfer_to\`. A split carries its \`lines\`, and the row's \`amount\` is the whole. A recurring row carries \`per_month\`: ${RATE_RULE}, divided by twelve. \`outflow_per_month\` and \`inflow_per_month\` total those ${COUNTED}; \`scope\` in the response gives the exact rule. Rows are ordered by \`date_next\` ascending, so the first rows are due soonest.
 
-This lists what YNAB will post, not what it has posted: once a scheduled transaction's date arrives it becomes an ordinary transaction and \`search_transactions\` finds it. The list is short enough to return whole, so filter it by reading it.
+This lists what YNAB will post, not what it has posted: once its date arrives a scheduled transaction becomes an ordinary one that \`search_transactions\` finds. The list is short enough to return whole, so filter it by reading it.
 
 ${SHARED_NOTES}`;
 
@@ -54,7 +59,7 @@ export function registerListScheduled(server: McpServer, store: BudgetStore): vo
       title: "List scheduled YNAB transactions",
       description,
       inputSchema: {
-        refresh: z.boolean().optional().describe("Pull the latest changes from YNAB before reporting, even if the cache is recent."),
+        refresh: z.boolean().optional().describe(REFRESH),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },

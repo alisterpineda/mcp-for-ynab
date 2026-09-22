@@ -19,7 +19,7 @@ import type {
   SubTransaction,
   Transaction,
 } from "../ynab/types.js";
-import { byName, fold } from "../format/text.js";
+import { byName, fold, searchable } from "../format/text.js";
 import { defaultDbPath } from "./paths.js";
 
 export interface DeltaStats {
@@ -71,6 +71,10 @@ export interface TransactionLine {
   cleared: ClearedStatus;
   approved: boolean;
   flagColor: string | null;
+  /** The flag's custom name, when the owner gave its colour one. */
+  flagName: string | null;
+  /** The payee as the bank sent it, when the line was imported. */
+  importedPayee: string | null;
   transferAccountId: string | null;
 }
 
@@ -101,7 +105,8 @@ export interface SpendingFilter {
  * Which lines a search looks at: the spending filter plus the things only a drill-down asks for.
  * `minAmount`/`maxAmount` are inclusive milliunit bounds on the line's absolute amount, so "between
  * 20 and 50" reads the way a person says it whichever way the money went; `direction` then picks a
- * side. `text` is a case-insensitive substring of the memo or the payee's name.
+ * side. `text` is a substring of the memo, the payee's name or the payee the bank sent, ignoring
+ * case and accents.
  */
 export interface SearchFilter extends SpendingFilter {
   minAmount?: number;
@@ -210,6 +215,11 @@ export interface CategoryTreeCategory {
   goalTarget: number | null;
   goalTargetDate: string | null;
   goalSnoozedAt: string | null;
+  /** YNAB's cadence code: how often the target repeats, read with `goalCadenceFrequency`. */
+  goalCadence: number | null;
+  goalCadenceFrequency: number | null;
+  /** Plan-your-spending goals only: true asks for the whole target each period, false refills up to it. */
+  goalNeedsWholeAmount: boolean | null;
   /** True when the category is hidden, or sits in a hidden group. */
   hidden: boolean;
 }
@@ -405,6 +415,9 @@ const ENTITY_TABLES: readonly EntityTable[] = [
       ["goal_target", "INTEGER", (e) => e.goal_target ?? null],
       ["goal_target_date", "TEXT", (e) => e.goal_target_date ?? null],
       ["goal_snoozed_at", "TEXT", (e) => e.goal_snoozed_at ?? null],
+      ["goal_cadence", "INTEGER", (e) => e.goal_cadence ?? null],
+      ["goal_cadence_frequency", "INTEGER", (e) => e.goal_cadence_frequency ?? null],
+      ["goal_needs_whole_amount", "INTEGER", (e) => (typeof e.goal_needs_whole_amount === "boolean" ? b(e.goal_needs_whole_amount) : null)],
     ],
     indexes: ["(budget_id, category_group_id)"],
   }),
@@ -421,7 +434,11 @@ const ENTITY_TABLES: readonly EntityTable[] = [
       ["cleared", "TEXT NOT NULL", (e) => e.cleared],
       ["approved", "INTEGER NOT NULL", (e) => b(e.approved)],
       ["flag_color", "TEXT", (e) => e.flag_color ?? null],
+      ["flag_name", "TEXT", (e) => e.flag_name ?? null],
       ["memo", "TEXT", (e) => e.memo ?? null],
+      // The payee as the bank statement had it, before YNAB's cleanup and the owner's rename rules:
+      // the name to search when a charge is not recognised under the name YNAB shows.
+      ["imported_payee", "TEXT", (e) => e.import_payee_name_original ?? e.import_payee_name ?? null],
     ],
     indexes: ["(budget_id, date)", "(budget_id, category_id, date)", "(budget_id, payee_id, date)", "(budget_id, account_id, date)"],
   }),
@@ -475,7 +492,7 @@ const ENTITY_TABLES: readonly EntityTable[] = [
   }),
 ];
 
-/** Tables holding one budget's rows; `clearBudget` empties exactly these. */
+/** Tables holding one budget's rows; a replacing `applyBudget` empties exactly these. */
 const BUDGET_SCOPED_TABLES: readonly string[] = [...ENTITY_TABLES.map((t) => t.table), "months", "month_categories", "raw"];
 
 /** `raw.kind` values: an entity table name, or one of these for the month rows. */
@@ -520,6 +537,9 @@ function openDatabase(dbPath: string): DatabaseSync {
     // The file holds whole budgets; keep it owner-only. SQLite gives the WAL sidecars the same mode.
     if (dbPath !== ":memory:") chmodSync(dbPath, 0o600);
     db.exec("PRAGMA journal_mode = WAL");
+    // The text search's folding, run in SQL so the comparison happens where the rows are. SQLite's
+    // own LOWER and LIKE fold ASCII only, which would leave "cafe" unable to find "Café".
+    db.function("search_fold", { deterministic: true }, (value) => (typeof value === "string" ? searchable(value) : value));
   } catch (error) {
     db.close();
     throw error;
@@ -600,10 +620,17 @@ export class BudgetDb {
    * Apply a full or delta budget payload: every entity is upserted by id, entities flagged
    * `deleted` are removed, and the budget row takes the new knowledge and sync time. Runs in one
    * transaction; any failure rolls the whole payload back. Month-category rows are not counted.
+   *
+   * `replace` drops the budget's cached rows first, inside the same transaction, for a full
+   * download that is the whole budget rather than changes to merge. Until the new copy commits the
+   * old one is still there, so a sync that fails before this point never leaves the budget empty.
    */
-  applyBudget(budgetId: string, budget: BudgetDetail, serverKnowledge: number, now: Date): DeltaStats {
+  applyBudget(budgetId: string, budget: BudgetDetail, serverKnowledge: number, now: Date, options: { replace?: boolean } = {}): DeltaStats {
     const stats: DeltaStats = { upserted: 0, deleted: 0 };
     this.transaction(() => {
+      if (options.replace) {
+        for (const table of BUDGET_SCOPED_TABLES) this.stmt(`DELETE FROM ${table} WHERE budget_id = ?`).run(budgetId);
+      }
       this.stmt(budgetUpsertSql(["server_knowledge", "last_synced_at"])).run(
         ...budgetValues({ ...budget, id: budgetId }),
         serverKnowledge,
@@ -687,16 +714,6 @@ export class BudgetDb {
     }
   }
 
-  /** Drop one budget's cached data and forget its knowledge, so the next sync is a full download. */
-  clearBudget(budgetId: string): void {
-    this.transaction(() => {
-      for (const table of BUDGET_SCOPED_TABLES) {
-        this.stmt(`DELETE FROM ${table} WHERE budget_id = ?`).run(budgetId);
-      }
-      this.stmt("UPDATE budgets SET server_knowledge = NULL, last_synced_at = NULL WHERE id = ?").run(budgetId);
-    });
-  }
-
   /**
    * The entity exactly as YNAB sent it, for fields that are not columns. `kind` is an entity table
    * name (`transactions`, `categories`, ...), or `months` / `month_categories` keyed by month and
@@ -756,9 +773,10 @@ export class BudgetDb {
 
   /**
    * The spending lines in range: every flattened line on an on-budget account that either carries a
-   * non-internal category, or carries no category and is not a transfer. A categorized transfer to
-   * a tracking account stays (YNAB counts it as spending); a transfer between budget accounts, a
-   * line on a tracking account and an inflow all drop out. A line whose category id no longer
+   * non-internal category, or carries no category and is not a transfer to another on-budget
+   * account. A transfer to a tracking account stays, in its category or as Uncategorized until it
+   * has one (YNAB counts it as spending either way); a transfer between budget accounts, a line on a
+   * tracking account and an inflow all drop out. A line whose category id no longer
    * resolves stays too, named `(deleted category)`, so the total still reconciles.
    */
   spendingLines(budgetId: string, filter: SpendingFilter = {}): TransactionLine[] {
@@ -850,7 +868,7 @@ export class BudgetDb {
       SELECT
         SUM(CASE WHEN COALESCE(a.on_budget, 0) = 0 THEN 1 ELSE 0 END) AS tracking,
         SUM(CASE WHEN COALESCE(a.on_budget, 0) = 1 AND COALESCE(c.internal, 0) = 1 THEN 1 ELSE 0 END) AS inflows,
-        SUM(CASE WHEN COALESCE(a.on_budget, 0) = 1 AND l.category_id IS NULL AND l.transfer_account_id IS NOT NULL
+        SUM(CASE WHEN COALESCE(a.on_budget, 0) = 1 AND l.category_id IS NULL AND ${BUDGET_TRANSFER}
                  THEN 1 ELSE 0 END) AS transfers
       FROM lines l
       LEFT JOIN accounts a   ON a.budget_id = $b AND a.id = l.account_id
@@ -1019,7 +1037,8 @@ export class BudgetDb {
    */
   categoryTree(budgetId: string, options: CategoryTreeOptions = {}): CategoryTreeGroup[] {
     const rows = this.stmt(
-      `SELECT c.id, c.name, c.note, c.goal_type, c.goal_target, c.goal_target_date, c.goal_snoozed_at, c.hidden,
+      `SELECT c.id, c.name, c.note, c.goal_type, c.goal_target, c.goal_target_date, c.goal_snoozed_at,
+              c.goal_cadence, c.goal_cadence_frequency, c.goal_needs_whole_amount, c.hidden,
               ${GROUP_COLUMNS}
        FROM categories c
        ${GROUP_JOIN}
@@ -1059,6 +1078,9 @@ export class BudgetDb {
         goalTarget: r.goal_target === null ? null : Number(r.goal_target),
         goalTargetDate: (r.goal_target_date as string | null) ?? null,
         goalSnoozedAt: (r.goal_snoozed_at as string | null) ?? null,
+        goalCadence: r.goal_cadence === null ? null : Number(r.goal_cadence),
+        goalCadenceFrequency: r.goal_cadence_frequency === null ? null : Number(r.goal_cadence_frequency),
+        goalNeedsWholeAmount: r.goal_needs_whole_amount === null ? null : Number(r.goal_needs_whole_amount) === 1,
         hidden,
       });
     }
@@ -1386,18 +1408,19 @@ function toMonthCategoryRow(r: Record<string, unknown>): MonthCategoryRow {
 
 /**
  * The flattening every line query starts from: one row per plain transaction, plus one row per
- * subtransaction inheriting its parent's date, account, cleared, approved, flag and — where the
- * split leaves them blank — payee and memo. `$b` is the budget id.
+ * subtransaction inheriting its parent's date, account, cleared, approved, flag, imported payee and —
+ * where the split leaves them blank — payee and memo. `$b` is the budget id.
  */
 const LINES_CTE = `
         SELECT t.id, NULL AS parent_id, t.date, t.amount, t.account_id, t.payee_id, t.category_id,
-               t.memo, t.transfer_account_id, t.cleared, t.approved, t.flag_color
+               t.memo, t.transfer_account_id, t.cleared, t.approved, t.flag_color, t.flag_name, t.imported_payee
         FROM transactions t
         WHERE t.budget_id = $b
           AND NOT EXISTS (SELECT 1 FROM subtransactions s WHERE s.budget_id = t.budget_id AND s.transaction_id = t.id)
         UNION ALL
         SELECT s.id, t.id, t.date, s.amount, t.account_id, COALESCE(s.payee_id, t.payee_id), s.category_id,
-               COALESCE(s.memo, t.memo), s.transfer_account_id, t.cleared, t.approved, t.flag_color
+               COALESCE(s.memo, t.memo), s.transfer_account_id, t.cleared, t.approved, t.flag_color, t.flag_name,
+               t.imported_payee
         FROM subtransactions s
         JOIN transactions t ON t.budget_id = s.budget_id AND t.id = s.transaction_id
         WHERE s.budget_id = $b`;
@@ -1411,11 +1434,21 @@ const SPENDING_FROM = `
       LEFT JOIN payees p          ON p.budget_id = $b AND p.id = l.payee_id`;
 
 /**
- * The rule itself, in one place: a real non-internal category, or no category and no transfer, or
- * a category id that no longer resolves (the line is still spending, and still has to reconcile).
+ * A line that moves money to another on-budget account: it never needs a category and is never
+ * spending. A transfer to a tracking account is not one of these — that money leaves the budget, so
+ * YNAB asks for a category and counts the line as Uncategorized until it has one. The spending rule,
+ * its exclusions and the uncategorized chore all read this one test, so they cannot disagree about
+ * which transfers are which.
+ */
+const BUDGET_TRANSFER = `EXISTS (SELECT 1 FROM accounts ta WHERE ta.budget_id = $b AND ta.id = l.transfer_account_id AND ta.on_budget = 1)`;
+
+/**
+ * The rule itself, in one place: a real non-internal category, or no category and no transfer to
+ * another on-budget account, or a category id that no longer resolves (the line is still spending,
+ * and still has to reconcile).
  */
 const SPENDING_RULE = `((c.id IS NOT NULL AND c.internal = 0)
-        OR (l.category_id IS NULL AND l.transfer_account_id IS NULL)
+        OR (l.category_id IS NULL AND NOT ${BUDGET_TRANSFER})
         OR (l.category_id IS NOT NULL AND c.id IS NULL))`;
 
 /**
@@ -1517,15 +1550,14 @@ function toScheduledLine(r: Record<string, unknown>): ScheduledLine {
  * never needs one either). A transfer to a tracking account does need a category, so one without it
  * is here. `a` is the search's outer-joined accounts row.
  */
-const UNCATEGORIZED_RULE = `(l.category_id IS NULL AND COALESCE(a.on_budget, 0) = 1
-        AND NOT EXISTS (SELECT 1 FROM accounts ta WHERE ta.budget_id = $b AND ta.id = l.transfer_account_id AND ta.on_budget = 1))`;
+const UNCATEGORIZED_RULE = `(l.category_id IS NULL AND COALESCE(a.on_budget, 0) = 1 AND NOT ${BUDGET_TRANSFER})`;
 
 /**
  * The spending filter's clauses plus the search-only ones. The amount bounds are on `ABS(amount)`
  * and inclusive, so a range reads the same whichever way the money went, and `direction` picks the
- * side. `text` is matched with `LIKE` on lower-cased memo and payee name: SQLite's `LOWER` folds
- * ASCII only, which is enough for the substring search a drill-down needs (the resolver, which has
- * to be exact, folds in JS instead). `%` and `_` in the input are escaped so they match themselves.
+ * side. `text` is matched with `LIKE` on the memo, the payee's name and the imported payee, each
+ * put through `search_fold` (accents and case folded, emoji kept) along with the term itself.
+ * `%` and `_` in the input are escaped so they match themselves.
  */
 function searchWhere(budgetId: string, filter: SearchFilter): { where: string[]; params: Record<string, SqlValue> } {
   const { where, params } = spendingWhere(budgetId, filter);
@@ -1549,8 +1581,16 @@ function searchWhere(budgetId: string, filter: SearchFilter): { where: string[];
     params.cleared = filter.cleared;
   }
   if (filter.text !== undefined && filter.text.trim() !== "") {
-    where.push(`(LOWER(COALESCE(l.memo, '')) LIKE $text ESCAPE '\\' OR LOWER(COALESCE(p.name, '')) LIKE $text ESCAPE '\\')`);
-    params.text = `%${filter.text.trim().toLowerCase().replace(/[\\%_]/g, "\\$&")}%`;
+    const term = searchable(filter.text).trim();
+    // A term that folds away to nothing ("^" or "´" on its own is all diacritic) matches nothing,
+    // rather than becoming `%%` and handing back every line as a match.
+    if (term === "") {
+      where.push("0");
+    } else {
+      const like = (column: string) => `search_fold(COALESCE(${column}, '')) LIKE $text ESCAPE '\\'`;
+      where.push(`(${[like("l.memo"), like("p.name"), like("l.imported_payee")].join(" OR ")})`);
+      params.text = `%${term.replace(/[\\%_]/g, "\\$&")}%`;
+    }
   }
   return { where, params };
 }
@@ -1647,6 +1687,8 @@ function toTransactionLine(r: Record<string, unknown>): TransactionLine {
     cleared: r.cleared as ClearedStatus,
     approved: Number(r.approved) === 1,
     flagColor: (r.flag_color as string | null) ?? null,
+    flagName: (r.flag_name as string | null) ?? null,
+    importedPayee: (r.imported_payee as string | null) ?? null,
     transferAccountId: (r.transfer_account_id as string | null) ?? null,
   };
 }

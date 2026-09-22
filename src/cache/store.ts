@@ -29,6 +29,7 @@ export interface StoreOptions {
  * Owns the sync policy for the active budget:
  * - `ensureFresh()` syncs only when the cache is older than the TTL, and fails soft when a cache exists.
  * - `sync()` always talks to YNAB (delta when the budget has been synced before, full otherwise).
+ * - `fullResync()` is the only way to force a full download over an existing cache.
  * - Concurrent callers share one in-flight sync.
  * Tools read the data through `db`.
  */
@@ -80,16 +81,17 @@ export class BudgetStore {
   }
 
   /**
-   * Return the active budget, synced no longer ago than the TTL if possible. If the sync fails and
-   * the budget has been synced before, the stale row is returned and the failure is recorded in
-   * `lastFailure`. Throws only when there is no cache at all and YNAB cannot be reached.
+   * Return the active budget, synced no longer ago than the TTL if possible. `force` syncs whatever
+   * the cache's age, and `full` re-downloads the whole budget instead of asking for changes. If the
+   * sync fails and the budget has been synced before, the stale row is returned and the failure is
+   * recorded in `lastFailure`. Throws only when there is no cache at all and YNAB cannot be reached.
    */
-  async ensureFresh(options: { force?: boolean } = {}): Promise<SyncedBudget> {
+  async ensureFresh(options: { force?: boolean; full?: boolean } = {}): Promise<SyncedBudget> {
     const age = this.ageMs();
     const stale = age === null || age >= this.ttlMs;
-    if (options.force || stale) {
+    if (options.full || options.force || stale) {
       try {
-        await this.sync();
+        await (options.full ? this.fullResync() : this.sync());
       } catch (error) {
         if (!this.current()) throw error;
         // Fail soft: answer from the last successful sync. The failure is already recorded.
@@ -98,29 +100,42 @@ export class BudgetStore {
     return this.current()!;
   }
 
-  /** True when the most recent sync attempt failed after the last successful one, i.e. the cache is stale because of it. */
+  /**
+   * True when the most recent sync attempt failed after the last successful one, i.e. the cache is
+   * stale because of it. A success here clears `lastFailure`, so the times only decide against a sync
+   * another process sharing the cache file wrote. A tie counts as a failure: both are millisecond
+   * times, and a failure this process still holds came after every success it had.
+   */
   get failedSinceLastSync(): SyncFailure | null {
     const failure = this.lastFailure;
     const current = this.current();
     if (!failure || !current) return null;
-    return failure.at.getTime() > Date.parse(current.lastSyncedAt) ? failure : null;
+    return failure.at.getTime() >= Date.parse(current.lastSyncedAt) ? failure : null;
   }
 
-  /** Discard the active budget's cached data, then pull the full budget again. */
+  /**
+   * Pull the whole budget again and replace the cached copy with it. The old copy is dropped in the
+   * transaction that writes the new one, so a download that fails leaves it answering.
+   */
   async fullResync(): Promise<SyncResult> {
-    await this.resolveActive();
-    // The list may switch the active budget; clear the budget the sync will actually download.
-    await this.refreshBudgetList();
-    // A sync started against the old data would write into it after we drop it; let it settle first.
-    if (this.inFlight) await this.inFlight.catch(() => {});
-    this.db.clearBudget(this.syncTarget());
-    return this.sync();
+    // A delta already under way would be joined rather than replaced, or land on top of the new copy;
+    // let it settle first. Nothing is awaited between the loop and `sync`, so no other sync slips in.
+    while (this.inFlight) await this.inFlight.catch(() => {});
+    return this.startSync(true);
   }
 
-  /** Talk to YNAB now: delta if the budget was synced before, otherwise full. Shares an in-flight sync. */
+  /**
+   * Talk to YNAB now: delta if the budget was synced before, otherwise full. Shares an in-flight
+   * sync, so a full download goes through `fullResync`, which waits one out instead of joining it.
+   */
   sync(): Promise<SyncResult> {
+    return this.startSync(false);
+  }
+
+  /** Start a sync, or join the one in flight — whose kind, not `full`, then decides what runs. */
+  private startSync(full: boolean): Promise<SyncResult> {
     if (!this.inFlight) {
-      this.inFlight = this.runSync().finally(() => {
+      this.inFlight = this.runSync(full).finally(() => {
         this.inFlight = null;
       });
     }
@@ -133,15 +148,17 @@ export class BudgetStore {
     return isSynced(row) ? row : null;
   }
 
-  private async runSync(): Promise<SyncResult> {
+  private async runSync(full: boolean): Promise<SyncResult> {
     const started = Date.now();
     try {
       await this.resolveActive();
+      // The list may switch the active budget, so the target is read only after it.
       await this.refreshBudgetList();
       const budgetId = this.syncTarget();
-      const knowledge = this.db.budgetRow(budgetId)?.serverKnowledge ?? undefined;
+      const knowledge = full ? undefined : (this.db.budgetRow(budgetId)?.serverKnowledge ?? undefined);
       const { budget, serverKnowledge } = await this.client.getBudget(budgetId, knowledge);
-      const stats = this.db.applyBudget(budgetId, budget, serverKnowledge, new Date());
+      // A full download is the whole budget, so it replaces what was cached rather than merging into it.
+      const stats = this.db.applyBudget(budgetId, budget, serverKnowledge, new Date(), { replace: knowledge === undefined });
       if (budgetId !== this.activeBudgetId) {
         // Only now is the new default usable offline; until here the previous budget kept serving.
         this.activeBudgetId = budgetId;

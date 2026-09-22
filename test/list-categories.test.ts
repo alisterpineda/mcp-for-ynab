@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { goalCadence, isKnownCadence } from "../src/tools/list-categories.js";
 import { category, goal, orientationBudget } from "./fixtures.js";
 import { harness } from "./mcp.js";
 
@@ -68,6 +69,51 @@ describe("list_categories", () => {
       group.categories.map((c) => (c.goal as { type: string }).type),
       ["target balance", "target balance by date", "monthly funding", "plan your spending", "debt payoff"],
     );
+  });
+
+  it("gives a repeating target its period, so a yearly target is not read as a monthly one", async () => {
+    const budget = orientationBudget({
+      categories: [
+        category("yearly", "Car insurance", goal("NEED", 1_200_000, { goal_cadence: 13, goal_cadence_frequency: 1, goal_needs_whole_amount: false })),
+        category("weekly", "Groceries", goal("NEED", 150_000, { goal_cadence: 2, goal_cadence_frequency: 1, goal_needs_whole_amount: true })),
+        category("quarterly", "Water", goal("NEED", 90_000, { goal_cadence: 4, goal_cadence_frequency: 1 })),
+        category("savings", "Savings", goal("TB", 5_000_000, { goal_cadence: 0 })),
+      ],
+    });
+    await using h = await harness({ budget });
+    const [group] = groupsOf(await h.json("list_categories"));
+    const goals = Object.fromEntries(group.categories.map((c) => [c.name, c.goal]));
+    assert.deepEqual(goals["Car insurance"], { type: "plan your spending", target: 1200, cadence: "yearly", next_period: "refill up to" });
+    assert.deepEqual(goals["Groceries"], { type: "plan your spending", target: 150, cadence: "weekly", next_period: "set aside another" });
+    assert.deepEqual(goals["Water"], { type: "plan your spending", target: 90, cadence: "every 3 months" });
+    assert.deepEqual(goals["Savings"], { type: "target balance", target: 5000 }, "a cadence of none says nothing");
+  });
+
+  it("puts every cadence YNAB documents into words", () => {
+    const cases: [number | null, number | null, string | null][] = [
+      [1, 1, "monthly"],
+      [1, 2, "every other month"],
+      [1, 6, "every 6 months"],
+      [2, 1, "weekly"],
+      [2, 2, "every other week"],
+      [2, 3, "every 3 weeks"],
+      [13, 1, "yearly"],
+      [13, 2, "every other year"],
+      // 3 to 12 are every 2 to 11 months and ignore the frequency; 14 is every other year.
+      [3, 5, "every other month"],
+      [4, null, "every 3 months"],
+      [12, null, "every 11 months"],
+      [14, null, "every other year"],
+      [1, null, "monthly"],
+      [0, 1, null],
+      [null, null, null],
+      [99, 1, "unrecognised cadence 99"],
+    ];
+    for (const [cadence, frequency, words] of cases) {
+      assert.equal(goalCadence(cadence, frequency), words, `cadence ${cadence}, frequency ${frequency}`);
+      // The live test asks `isKnownCadence`, so it must agree with the words on every code.
+      assert.equal(isKnownCadence(cadence), cadence !== 99, `cadence ${cadence} is known exactly when it has words`);
+    }
   });
 
   it("carries no money and nothing month-dependent", async () => {

@@ -134,17 +134,44 @@ describe("BudgetStore persistence and budget selection", () => {
     assert.equal(db.summary(BUDGET_ID).transactions, 3);
   });
 
-  it("fullResync discards the cache and downloads everything again", async () => {
+  it("fullResync downloads everything again and replaces the cache with it", async () => {
     const client = new FakeBudgetSource();
     const store = makeStore(client);
     await store.ensureFresh();
+    // YNAB's copy has lost a transaction without a delta ever saying so: only a replacement drops it.
+    client.full = { ...client.full, transactions: client.full.transactions!.filter((t) => t.id !== "t3") };
     const result = await store.fullResync();
     assert.equal(result.kind, "full");
     assert.deepEqual(
       client.calls.map((c) => c.knowledge),
       [undefined, undefined],
     );
+    assert.equal(store.db.summary(BUDGET_ID).transactions, 2);
+  });
+
+  it("counts a failure in the same millisecond as the last sync as a failure", async () => {
+    const store = makeStore(new FakeBudgetSource());
+    const budget = await store.ensureFresh();
+    // A fast failure right after a success can share its millisecond; it still came after it.
+    store.lastFailure = { at: new Date(budget.lastSyncedAt), message: "offline", rateLimited: false };
+    assert.equal(store.failedSinceLastSync?.message, "offline");
+    // A sync time written later, by another process sharing the file, does outrank it.
+    store.lastFailure = { at: new Date(Date.parse(budget.lastSyncedAt) - 1), message: "offline", rateLimited: false };
+    assert.equal(store.failedSinceLastSync, null);
+  });
+
+  it("a fullResync that cannot reach YNAB keeps the cache it was going to replace", async () => {
+    const client = new FakeBudgetSource();
+    const store = makeStore(client);
+    await store.ensureFresh();
+    client.fail = new YnabApiError("YNAB API 429: Too Many Requests", 429);
+    await assert.rejects(store.fullResync(), /429/);
     assert.equal(store.db.summary(BUDGET_ID).transactions, 3);
+    assert.equal(store.db.budgetRow(BUDGET_ID)?.serverKnowledge, 10, "and it can still be delta-synced");
+
+    const budget = await store.ensureFresh({ full: true });
+    assert.equal(budget.id, BUDGET_ID, "ensureFresh fails soft on a full resync like on any other sync");
+    assert.equal(store.lastFailure?.rateLimited, true);
   });
 
   it("uses the only budget when YNAB reports no default", async () => {
@@ -207,7 +234,7 @@ describe("BudgetStore persistence and budget selection", () => {
     assert.deepEqual(client.calls, [{ budgetId: "budget-2", knowledge: undefined }], "the new default is what gets tried");
   });
 
-  it("fullResync clears the budget it is about to download when YNAB's default changed", async () => {
+  it("fullResync replaces the budget it downloads when YNAB's default changed", async () => {
     const db = new BudgetDb(":memory:");
     await makeStore(new FakeBudgetSource(), { db }).ensureFresh();
 
@@ -218,7 +245,7 @@ describe("BudgetStore persistence and budget selection", () => {
     const result = await store.fullResync();
     assert.equal(result.kind, "full");
     assert.deepEqual(client.calls, [{ budgetId: "budget-2", knowledge: undefined }]);
-    assert.equal(db.budgetRow(BUDGET_ID)?.serverKnowledge, 10, "the previous budget is not the one cleared");
+    assert.equal(db.budgetRow(BUDGET_ID)?.serverKnowledge, 10, "the previous budget is not the one replaced");
     assert.equal(db.summary(BUDGET_ID).transactions, 3);
     assert.equal(db.activeBudgetId(), "budget-2");
   });

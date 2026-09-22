@@ -44,7 +44,7 @@ numbers in the currency named once in the response envelope, the keys use YNAB's
 than in YNAB's on-screen order, which the API does not expose. Four exceptions: `list_accounts`
 groups accounts by type first and orders by name inside each group, `spending_breakdown` sorts
 its rows by amount spent, `search_transactions` returns its rows newest first, and
-`budget_vs_actual` puts the most overspent categories first.
+`budget_vs_actual` puts the most overspent categories first, by amount.
 
 - `list_categories` — what exists and what it is for: category groups and categories with their
   ids, notes and goal definitions. `search` matches part of a category or group name, ignoring
@@ -60,50 +60,53 @@ its rows by amount spent, `search_transactions` returns its rows newest first, a
   Categories that are zero on all three figures are counted in `categories_omitted` instead of
   listed. `month` is `YYYY-MM` and defaults to the current month; `refresh: true` pulls from YNAB
   first. Deliberately carries no ids.
-- `spending_breakdown` — where the money went: spending over a date range grouped by `category`
-  (the default), `category_group`, `payee`, `account` or `month`. Each row carries `spent`, the
-  line `count` and its `share` of the total; rows past the cap (25, or `limit`) are summed into
-  `other`, and a month grouping is zero-filled and never capped. `start` and `end` take
-  `YYYY-MM-DD` or `YYYY-MM` and default to the current month to date. The `categories`, `groups`,
-  `payees` and `accounts` filters take ids or names — a whole name first, else a part that only one
-  entity contains — and the response echoes what each resolved to under `filters`. The response
-  states its `scope` — the spending rule it applied — and counts what that rule dropped under
-  `excluded`.
+- `spending_breakdown` — where the money went: spending over a date range grouped by `category` (the
+  default), `category_group`, `payee`, `account` or `month`. Each row carries `spent`, the line
+  `count` and its `share` of the total; rows past the cap (25, or `limit`) are summed into `other`,
+  and a month grouping is zero-filled from the budget's first month on and never capped. `start` and
+  `end` take `YYYY-MM-DD` or `YYYY-MM` and default to the current month to date. The `categories`,
+  `groups`, `payees` and `accounts` filters take ids or names — a whole name first, else a part that
+  only one entity contains — and the response echoes what each resolved to under `filters`. The
+  response states its `scope` — the spending rule it applied — and counts what that rule dropped
+  under `excluded`.
 - `spending_trend` — whether it is creeping up: a month-by-month series of spending for the
   `categories` and `groups` you name (ids or names, whole or a unique part), one series each in the order asked,
   a group series summing its categories. The window is the last six months ending at the current
-  one; `months` changes how many and `start`/`end` as `YYYY-MM` win over it. Months with no
-  activity read as zero, and each series carries `average`, `min` and `max` over the complete
+  one; `months` changes how many and `start`/`end` as `YYYY-MM` win over it. A window reaching back
+  before the budget's history is cut at its first month and says so under `history_starts`. Months
+  with no activity read as zero, and each series carries `average`, `min` and `max` over the complete
   months — the current month is flagged `partial` and left out unless `include_partial` is set.
 - `search_transactions` — the lines behind a number: transactions filtered by date, `categories`,
   `groups`, `payees`, `accounts`, an absolute amount range (`min_amount`/`max_amount` in currency
-  units), `direction` and `text` (part of a memo or payee name). No spending rule applies, so
-  tracking accounts, transfers and income are all reachable; a split comes back as one row per
-  line with its `parent_id`. Rows keep YNAB's sign, come newest first and stop at `limit` (50 by
-  default, 200 at most), while `count` and `sum` always cover every match. It is also where the
-  register's chores are: `uncategorized: true` finds the lines YNAB wants categorized (on-budget,
-  no category, not a transfer to another on-budget account), `approved: false` the imports waiting
-  for approval, and `cleared` picks a cleared state. When `uncategorized` is given (either way)
-  or `approved` is false and no `start` is, the search covers the whole history rather than the
-  current month.
+  units), `direction` and `text` (part of a memo, a payee name or the payee as the bank sent it,
+  ignoring case and accents). No spending rule applies, so tracking accounts, transfers and income
+  are all reachable; a split comes back as one row per line with its `parent_id`. A row names the
+  bank's payee as `imported_payee` when YNAB shows another, and a custom flag name as `flag_name`.
+  Rows keep YNAB's sign, come newest first and stop at `limit` (50 by default, 200 at most), while
+  `count` and `sum` always cover every match. It is also where the register's chores are:
+  `uncategorized: true` finds the lines YNAB wants categorized (on-budget, no category, not a
+  transfer to another on-budget account), `approved: false` the imports waiting for approval, and
+  `cleared` picks a cleared state. When `uncategorized` is given (either way) or `approved` is false
+  and no `start` is, the search covers the whole history rather than the current month.
 - `list_scheduled` — what is coming up: every scheduled transaction, soonest first, with its
   frequency in words, `date_next`, amount with YNAB's sign, payee, category, account, the account a
   transfer goes to, and a split's `lines`. A recurring row carries `per_month` (the amount times the
   frequency's occurrences a year, divided by twelve), and the response totals the recurring
   `outflow_per_month` and `inflow_per_month` on on-budget accounts, leaving out transfers to another
   on-budget account. No parameters besides `refresh`; the list is short enough to return whole.
-- `budget_vs_actual` — where the plan and the spending disagree: one row per category over a
-  window of months with `assigned` and `activity` summed, `available` at the end of the last
-  month, and counts of the months that ended in the red (`overspent_months`) and the months where
-  spending ran past the assignment (`over_assigned_months`). It reads YNAB's own per-month
-  figures, so it cannot disagree with the budget screen. The window is the last six months ending
-  at the current one; `months` changes how many and `start`/`end` as `YYYY-MM` win over it.
-  Categories that are zero throughout are counted in `categories_omitted`; hidden and credit card
-  payment categories are kept and marked. `include_months` adds the per-month figures, and the
-  current month is flagged `partial_month` and left out of both counts unless `include_partial`
-  is set. `categories` and `groups` take ids or names, whole or a unique part.
+- `budget_vs_actual` — where the plan and the spending disagree: one row per category over a window
+  of months with `assigned` and `activity` summed, `available` at the end of the last month, and
+  counts of the months that ended in the red (`overspent_months`, with `overspent` the shortfall
+  summed) and the months where spending ran past the assignment (`over_assigned_months`). It reads
+  YNAB's own per-month figures, so it cannot disagree with the budget screen. The window is the last
+  six months ending at the current one; `months` changes how many and `start`/`end` as `YYYY-MM` win
+  over it. Categories that are zero throughout are counted in `categories_omitted`; hidden and
+  credit card payment categories are kept and marked. `include_months` adds the per-month figures,
+  and the current month is flagged `partial_month` and left out of both counts unless
+  `include_partial` is set. `categories` and `groups` take ids or names, whole or a unique part.
 - `sync_status` — budget name, last sync time, transaction count, date range, and sync health.
-  `refresh: true` forces a delta sync; `full_resync: true` discards the cache and re-downloads everything.
+  `refresh: true` forces a delta sync; `full_resync: true` re-downloads everything and replaces the
+  cache with it, keeping the old copy if the download fails.
 
 ## Tests
 

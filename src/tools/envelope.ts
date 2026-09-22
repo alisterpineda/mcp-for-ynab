@@ -44,11 +44,7 @@ export async function freshBudget(
   options: { force?: boolean; fullResync?: boolean } = {},
 ): Promise<{ budget: SyncedBudget; error?: never } | { budget?: never; error: TextResult }> {
   try {
-    if (options.fullResync) {
-      await store.fullResync();
-      return { budget: await store.ensureFresh() };
-    }
-    return { budget: await store.ensureFresh({ force: options.force === true }) };
+    return { budget: await store.ensureFresh({ force: options.force === true, full: options.fullResync === true }) };
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
     return { error: { isError: true, content: [{ type: "text", text: `No cached data and YNAB could not be reached: ${message}` }] } };
@@ -114,8 +110,16 @@ export async function respond(
  * confidently wrong answer: what the numbers are, what the keys mean, where ids come from, and
  * that the row order is the tool's own. The ordering itself is stated per tool, since the
  * analysis tools each sort by something other than the name.
+ *
+ * Every description has to fit in 2,048 characters: Claude Code cuts a tool description there
+ * without a word, and these notes come last, so they are the first thing lost. The server's
+ * `instructions` would say them once, but Claude Desktop does not read that field. What belongs
+ * to one parameter goes in that parameter's own description instead, which is not cut.
  */
-export const SHARED_NOTES = `Responses are compact JSON. Amounts are plain numbers in the currency named by \`currency\` in the envelope — no symbol, rendered at that currency's precision. The keys use YNAB's own words: \`assigned\` is Assigned, \`available\` is Available, \`ready_to_assign\` is Ready to Assign. Category and account ids come from \`list_categories\` and \`list_accounts\`; \`get_month\` deliberately carries no ids, so resolve a category through \`list_categories\` first. Each tool's description states its own row order, and none of them is YNAB's on-screen order — never describe a row by its position unless that order gives the position a meaning. \`as_of\` is when the data was last synced from YNAB, and a \`warning\` key means the latest sync attempt failed and the figures come from the one before it.`;
+export const SHARED_NOTES = `Amounts are plain numbers in the currency named by \`currency\` in the envelope, at its precision, with no symbol. Keys use YNAB's own words: \`assigned\` is Assigned, \`available\` is Available, \`ready_to_assign\` is Ready to Assign. Filters take names as well as ids; the ids come from \`list_categories\` and \`list_accounts\`, since \`get_month\` carries none. Each tool states its own row order, and none is YNAB's on-screen order, so never describe a row by its position unless that order gives it a meaning. \`as_of\` is the last sync from YNAB; a \`warning\` key means the latest sync failed and the figures come from the one before.`;
+
+/** The `refresh` parameter of every report whose figures an edit in YNAB can move, worded once. */
+export const REFRESH = "Pull the latest changes from YNAB before reporting, even if the cache is recent. Use it when the user says they just changed something in YNAB.";
 
 /** The ordering the orientation tools share, appended after `SHARED_NOTES` by each of them. */
-export const ALPHABETICAL_ORDER = `Everything is ordered alphabetically, which is not YNAB's on-screen order; the one exception is \`list_accounts\`, which groups accounts by type first and orders by name inside each group.`;
+export const ALPHABETICAL_ORDER = `Everything is ordered alphabetically, which is not YNAB's on-screen order (\`list_accounts\` groups accounts by type first).`;

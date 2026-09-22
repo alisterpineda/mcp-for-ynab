@@ -2,15 +2,15 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { MonthlySpending } from "../cache/db.js";
 import type { BudgetStore } from "../cache/store.js";
-import { currentMonth, dateRange, MAX_MONTHS, monthWindow } from "./dates.js";
-import { respond, SHARED_NOTES, ToolError, type Report, type ToolContext } from "./envelope.js";
-import { resolveFilters } from "./filters.js";
+import { currentMonth, dateRange, historyStart, MAX_MONTHS, monthWindow } from "./dates.js";
+import { REFRESH, respond, SHARED_NOTES, ToolError, type Report, type ToolContext } from "./envelope.js";
+import { BY_ID_OR_NAME, resolveFilters } from "./filters.js";
 
 const description = `Is it creeping up? A month-by-month series of spending for the categories or category groups you name, with the average, the lowest month and the highest. This is the tool for "how has dining out gone over the last six months?" and "are we spending more on groceries than we used to?".
 
-Ask for at least one \`categories\` or \`groups\` entry, by id or name — a whole name first, else a part that only one entity contains — and an ambiguous name comes back as an error listing the candidates. Each one becomes its own series in the order you asked, named by \`id\` and \`name\` so a partial name shows what it landed on, a group series being the sum of every category in it. The window is the last six months ending at the current month; \`months\` changes how many, and \`start\` and \`end\` as \`YYYY-MM\` win over it. The window cannot run past the current month, since a month that has not started has no spending to trend. Every month of the window is present in chronological order, and a month with no activity reads \`spent: 0\` rather than going missing.
+Name at least one of \`categories\` or \`groups\`. Each becomes its own series in the order asked, named by \`id\` and \`name\` so a partial name shows what it landed on; a group series sums its categories. The window is the last six months ending at the current one, and never runs past it. Nor does it reach back before the budget: a window that would starts at the budget's first month, named by \`history_starts\`, so the series is shorter than asked and the statistics cover only months the budget existed in. Every month is present in chronological order, and one with no activity reads \`spent: 0\`.
 
-\`spent\` is positive for spending and negative for a month that netted a refund. The same rule as \`spending_breakdown\` decides what counts: lines on on-budget accounts with a non-internal category, so a categorized transfer to a tracking account counts, transfers between budget accounts and income do not, and each line of a split lands in its own category. The current month is still being lived in, so it is flagged \`partial\` and left out of \`average\`, \`min\` and \`max\`; \`include_partial: true\` counts it, and when the window holds no complete month those three keys are absent rather than guessed.
+\`spent\` is positive for spending and negative for a month that netted a refund, counted by the same rule as \`spending_breakdown\`: a categorized transfer to a tracking account counts, transfers between budget accounts and income do not, and each split line lands in its own category. The current month is flagged \`partial\` and left out of \`average\`, \`min\` and \`max\` unless \`include_partial\` is set; with no complete month in the window those keys are absent rather than guessed.
 
 ${SHARED_NOTES}`;
 
@@ -21,13 +21,13 @@ export function registerSpendingTrend(server: McpServer, store: BudgetStore): vo
       title: "Trend YNAB spending by month",
       description,
       inputSchema: {
-        categories: z.array(z.string()).optional().describe("Categories to trend, one series each, by id or name (a whole name, or a part only one category contains)."),
-        groups: z.array(z.string()).optional().describe("Category groups to trend, one series each summing the group's categories, by id or name (a whole name, or a part only one group contains)."),
+        categories: z.array(z.string()).optional().describe(`Categories to trend, one series each. ${BY_ID_OR_NAME}`),
+        groups: z.array(z.string()).optional().describe(`Category groups to trend, one series each summing the group's categories. ${BY_ID_OR_NAME}`),
         months: z.number().int().positive().max(MAX_MONTHS).optional().describe(`How many months the window covers, ending at the current month. Defaults to 6, at most ${MAX_MONTHS}.`),
         start: z.string().optional().describe("First month of the window, `YYYY-MM`. Wins over `months`."),
-        end: z.string().optional().describe("Last month of the window, `YYYY-MM`, inclusive. Wins over `months`; defaults to the current month."),
+        end: z.string().optional().describe("Last month of the window, `YYYY-MM`, inclusive. Wins over `months`; defaults to the current month and cannot be later."),
         include_partial: z.boolean().optional().describe("Count the current, unfinished month in `average`, `min` and `max`. Off by default."),
-        refresh: z.boolean().optional().describe("Pull the latest changes from YNAB before reporting, even if the cache is recent."),
+        refresh: z.boolean().optional().describe(REFRESH),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -69,13 +69,21 @@ function buildTrend(context: ToolContext, args: TrendArgs): Report {
     ...(resolved.echo?.groups ?? []).map(({ id, name }) => ({ id, name, kind: "category_group" as const })),
   ];
 
-  const months = monthWindow(args.months, args.start, args.end);
-  const [first, last] = [months[0], months[months.length - 1]];
+  const asked = monthWindow(args.months, args.start, args.end);
+  const last = asked[asked.length - 1];
   // A month that has not started has no spending to trend, and a zero for it would read as a
   // month of spending nothing — so a window past the current month is refused, not zero-filled.
   if (last > currentMonth()) {
     throw new ToolError(`The window ends at ${last}, after the current month ${currentMonth()}; there is no spending to trend there yet.`);
   }
+  // The same holds at the other end: a month before the budget existed is cut from the window, and
+  // the response says where the history starts so a shorter series is not read as the one asked for.
+  const floor = historyStart(context.budget.firstMonth, context.db.earliestDate(budgetId));
+  const months = floor === null ? asked : asked.filter((month) => month >= floor);
+  if (months.length === 0) {
+    throw new ToolError(`The budget's history starts at ${floor}, after the window's end ${last}; there is no spending to trend there.`);
+  }
+  const first = months[0];
   // The months are whole, so the range is the first day of the first to the last day of the last.
   const { from, to } = dateRange(first, last);
   const partialMonth = months.includes(currentMonth()) ? currentMonth() : null;
@@ -87,6 +95,7 @@ function buildTrend(context: ToolContext, args: TrendArgs): Report {
   if (groupIds.length > 0) index(found, context.db.spendingByMonth(budgetId, "category_group", { from, to, groupIds }));
 
   const body: Report = { start: first, end: last };
+  if (months.length < asked.length) body.history_starts = first;
   if (partialMonth) body.partial_month = partialMonth;
   body.series = specs.map((spec) =>
     buildSeries(context, spec, found.get(spec.id) ?? new Map(), months, partialMonth, args.include_partial === true),

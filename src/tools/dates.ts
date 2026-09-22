@@ -59,6 +59,17 @@ export function monthWindow(months?: number, start?: string, end?: string, today
   return keys;
 }
 
+/**
+ * The first month the budget has anything in, `YYYY-MM`: its first budget month, or the month of an
+ * earlier transaction when one predates it. Null for a budget with neither. A monthly series starts
+ * here at the earliest, because a month before it would read as spending nothing when it is really
+ * a month with no budget at all — and a zero like that drags an average down.
+ */
+export function historyStart(firstMonth: string | null, earliestDate: string | null): string | null {
+  const months = [firstMonth, earliestDate].filter((value): value is string => value !== null).map((value) => value.slice(0, 7));
+  return months.length === 0 ? null : months.reduce((a, b) => (a < b ? a : b));
+}
+
 /** One end of a range, as a full ISO day. A month widens outwards, to the edge the end asks for. */
 function edge(input: string, which: "start" | "end", side: "first" | "last"): string {
   const value = input.trim();

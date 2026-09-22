@@ -18,6 +18,9 @@ const ARGUMENTS: Record<string, Record<string, unknown>[]> = {
 };
 const DEFAULT_ARGUMENTS = [{}, { include_hidden: true }, { include_closed: true }];
 
+/** Where Claude Code cuts an MCP tool description, appending "… [truncated]". */
+const CLAUDE_CODE_DESCRIPTION_LIMIT = 2048;
+
 /** The row order each tool promises, in its own words; the shared note only says the order is its own. */
 const ORDERING: Record<string, RegExp> = {
   get_month: /ordered alphabetically, which is not YNAB's on-screen order/,
@@ -52,10 +55,23 @@ describe("the registered tools", () => {
     for (const { name, description = "" } of tools) {
       assert.match(description, /plain numbers in the currency named by `currency`/, `${name}: what the amounts are`);
       assert.match(description, /`assigned` is Assigned, `available` is Available, `ready_to_assign` is Ready to Assign/, `${name}: the vocabulary`);
-      assert.match(description, /ids come from `list_categories`[\s\S]*`get_month` deliberately carries no ids/, `${name}: where ids come from`);
+      assert.match(
+        description,
+        /Filters take names as well as ids; the ids come from `list_categories` and `list_accounts`, since `get_month` carries none/,
+        `${name}: where ids come from, and that get_month is not one of them`,
+      );
       assert.match(description, /states its own row order/, `${name}: that the order is the tool's own`);
       assert.match(description, ORDERING[name], `${name}: the ordering`);
       assert.ok(description.length > 500, `${name}: a full description, not a one-liner`);
+    }
+  });
+
+  it("keeps every description within the 2,048 characters Claude Code passes on", async () => {
+    // Claude Code cuts a longer description there without a word (anthropics/claude-code#87650),
+    // and the shared notes come last, so they would be the first thing the model never sees.
+    await using h = await harness();
+    for (const { name, description = "" } of (await h.client.listTools()).tools) {
+      assert.ok(description.length <= CLAUDE_CODE_DESCRIPTION_LIMIT, `${name}: ${description.length} characters`);
     }
   });
 

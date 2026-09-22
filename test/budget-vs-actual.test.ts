@@ -19,6 +19,7 @@ interface Row {
   activity: number;
   available: number;
   overspent_months: number;
+  overspent?: number;
   over_assigned_months: number;
   hidden?: true;
   credit_card_payment?: true;
@@ -67,6 +68,7 @@ describe("budget_vs_actual", () => {
       activity: -185,
       available: -55,
       overspent_months: 1,
+      overspent: 55,
       over_assigned_months: 2,
     });
   });
@@ -82,6 +84,30 @@ describe("budget_vs_actual", () => {
     assert.deepEqual(
       rowsOf(body).map((row) => row.overspent_months),
       [1, 1, 0, 0, 0, 0, 0],
+    );
+  });
+
+  it("ranks by how far into the red a category went, not only how often", async () => {
+    // Groceries ends three months 2 in the red; Household ends one month 900 in the red.
+    const small = { budgeted: 10_000, activity: -12_000, balance: -2_000 };
+    const quiet = { budgeted: 0, activity: 0, balance: 0 };
+    const budget = spendingBudget({
+      months: [
+        month("2026-06-01", [monthCategory("c1", small), monthCategory("c2", quiet)]),
+        month("2026-07-01", [monthCategory("c1", small), monthCategory("c2", { budgeted: 100_000, activity: -1_000_000, balance: -900_000 })]),
+        month("2026-08-01", [monthCategory("c1", small), monthCategory("c2", quiet)]),
+      ],
+      transactions: [],
+      subtransactions: [],
+    });
+    await using h = await harness({ budget });
+    const rows = rowsOf(await h.json("budget_vs_actual", { start: "2026-06", end: "2026-08" }));
+    assert.deepEqual(
+      rows.map((row) => [row.name, row.overspent_months, row.overspent]),
+      [
+        ["Household", 1, 900],
+        ["Groceries", 3, 6],
+      ],
     );
   });
 
@@ -202,6 +228,7 @@ describe("budget_vs_actual and the month still being lived in", () => {
     assert.equal(row.activity, -120);
     assert.equal(row.available, -20);
     assert.equal(row.overspent_months, 1);
+    assert.equal(row.overspent, 10, "the finished month's shortfall only");
     assert.equal(row.over_assigned_months, 1);
     assert.deepEqual(row.months, [
       { month: monthFromNow(-1), assigned: 40, activity: -50, available: -10 },
@@ -213,6 +240,7 @@ describe("budget_vs_actual and the month still being lived in", () => {
     await using h = await harness({ budget: aroundToday() });
     const row = rowsOf(await h.json("budget_vs_actual", { months: 2, include_partial: true }))[0];
     assert.equal(row.overspent_months, 2);
+    assert.equal(row.overspent, 30);
     assert.equal(row.over_assigned_months, 2);
   });
 

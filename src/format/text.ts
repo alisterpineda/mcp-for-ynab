@@ -14,6 +14,15 @@ export function fold(value: string): string {
   return value.normalize("NFD").replace(DIACRITIC, "").replace(EMOJI, "").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+/**
+ * The looser form a substring search compares: accents folded and lower-cased, nothing dropped.
+ * Unlike `fold` it keeps emoji and spacing, because a search for "🎁" is asking for the emoji
+ * itself, where a name match only wants the words.
+ */
+export function searchable(value: string): string {
+  return value.normalize("NFD").replace(DIACRITIC, "").toLowerCase();
+}
+
 /** Orders by the folded name, with the raw name breaking ties so the order is total. */
 export function byName<T>(name: (item: T) => string): (a: T, b: T) => number {
   return (a, bb) => {

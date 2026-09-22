@@ -133,8 +133,10 @@ describe("spending_breakdown", () => {
   });
 
   it("groups by month chronologically, with a zero row for a month that had nothing", async () => {
-    await using h = await spending();
+    // The budget starts in June here, so June is a month it lived through without spending.
+    await using h = await harness({ budget: spendingBudget({ first_month: "2026-06-01" }) });
     const body = await h.json("spending_breakdown", { start: "2026-06", end: "2026-09", group_by: "month" });
+    assert.ok(!("history_starts" in body), "the range sits inside the budget's history");
     assert.deepEqual(
       rowsOf(body).map((r) => [r.name, r.spent, r.count]),
       [
@@ -147,10 +149,29 @@ describe("spending_breakdown", () => {
   });
 
   it("ignores the cap when grouping by month, because a series with holes is a lie", async () => {
-    await using h = await spending();
+    await using h = await harness({ budget: spendingBudget({ first_month: "2026-06-01" }) });
     const body = await h.json("spending_breakdown", { start: "2026-06", end: "2026-09", group_by: "month", limit: 2 });
     assert.equal(rowsOf(body).length, 4);
     assert.ok(!("other" in body));
+  });
+
+  it("starts a month series at the budget's first month rather than zero-filling months before it", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", { start: "2026-04", end: "2026-08", group_by: "month" });
+    assert.equal(body.start, "2026-04-01", "the range asked for is still the range the lines were read over");
+    assert.equal(body.history_starts, "2026-07");
+    assert.deepEqual(
+      rowsOf(body).map((r) => [r.name, r.spent]),
+      [
+        ["2026-07", 307],
+        ["2026-08", 333],
+      ],
+    );
+    assert.equal(body.total, 640);
+
+    const before = await h.json("spending_breakdown", { start: "2026-01", end: "2026-03", group_by: "month" });
+    assert.deepEqual(before.rows, [], "a range wholly before the budget has no months to show");
+    assert.equal(before.total, 0);
   });
 
   it("caps the rows and sums the remainder into an `other` row", async () => {
@@ -226,6 +247,26 @@ describe("spending_breakdown", () => {
     // t24 and t27 are on tracking accounts, t25/t26 are the two sides of a credit card payment,
     // t28 is the paycheque.
     assert.deepEqual(body.excluded, { transfers: 2, tracking: 2, inflows: 1 });
+  });
+
+  it("counts a transfer to a tracking account left without a category as Uncategorized, the way the search's chores do", async () => {
+    // u1 moves money out of the budget into the brokerage with no category yet; u2 is its tracking side.
+    await using h = await harness({
+      budget: spendingBudget({
+        transactions: [
+          ...spendingBudget().transactions!,
+          transaction("u1", "2026-08-30", -25_000, { payee_id: "pt4", category_id: null, transfer_account_id: "a4" }),
+          transaction("u2", "2026-08-30", 25_000, { account_id: "a4", payee_id: "pt1", category_id: null, transfer_account_id: "a1" }),
+        ],
+      }),
+    });
+    const body = await h.json("spending_breakdown", { start: "2026-08", end: "2026-08" });
+    assert.equal(byName(body, "Uncategorized").spent, 25);
+    assert.equal(body.total, 358, "the fixture's 333 plus u1");
+    assert.deepEqual(body.excluded, { transfers: 2, tracking: 3, inflows: 1 }, "u1 is not a budget-to-budget transfer; u2 is tracking");
+
+    const chores = await h.json("search_transactions", { start: "2026-08", end: "2026-08", uncategorized: true });
+    assert.equal(byName(body, "Uncategorized").spent, -Number(chores.sum), "the Uncategorized row is exactly the lines waiting for a category");
   });
 
   it("defaults the range to the current month", async () => {

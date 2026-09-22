@@ -4,14 +4,14 @@ import type { MonthCategoryRangeRow } from "../cache/db.js";
 import type { BudgetStore } from "../cache/store.js";
 import { byName } from "../format/text.js";
 import { currentMonth, MAX_MONTHS, monthWindow } from "./dates.js";
-import { respond, SHARED_NOTES, type Report, type ToolContext } from "./envelope.js";
-import { resolveFilters } from "./filters.js";
+import { REFRESH, respond, SHARED_NOTES, type Report, type ToolContext } from "./envelope.js";
+import { BY_ID_OR_NAME, resolveFilters } from "./filters.js";
 
-const description = `Which categories do we keep overspending? Assigned against actual, category by category, over a window of months, read from YNAB's own per-month figures rather than recomputed from transactions — so it cannot disagree with the budget screen.
+const description = `Which categories do we keep overspending? Assigned against actual, category by category, over a window of months, read from YNAB's own per-month figures, so it cannot disagree with the budget screen.
 
-Each row sums \`assigned\` and \`activity\` over the window, carries \`available\` as the category's balance at the end of the last month (absent when YNAB has no figures for that month yet), and counts the months that ended in the red (\`overspent_months\`) and the months where spending ran past the assignment (\`over_assigned_months\`). Those two answer different questions: a category can be overspent because last month's balance was already gone, and it can outrun its assignment while a carried-over balance keeps it black. \`activity\` keeps YNAB's sign, so spending is negative and a net refund is positive.
+Each row sums \`assigned\` and \`activity\` over the window, carries \`available\` as the balance at the end of the last month (absent when YNAB has no figures for it yet), and counts the months that ended in the red (\`overspent_months\`, with \`overspent\` how far in total) and the months where spending ran past the assignment (\`over_assigned_months\`). The two differ: a category can be overspent because last month's balance was already gone, and can outrun its assignment while a carried-over balance keeps it black. \`activity\` keeps YNAB's sign, so spending is negative.
 
-The window is the last six months ending at the current month; \`months\` changes how many, and \`start\` and \`end\` as \`YYYY-MM\` win over it. Categories with nothing assigned, no activity and no balance in every month are left out and counted in \`categories_omitted\`. Rows come most-overspent first, then biggest spender. \`include_months: true\` adds the per-month figures to each row. Hidden categories are included and marked \`hidden\`; credit card payment categories are included and marked \`credit_card_payment\`, and their activity is YNAB's own figure for the card — spending moved onto it minus payments made — not spending in itself. The current month is still being lived in, so it is reported as \`partial_month\` and left out of both counts — \`include_partial: true\` counts it — while its assigned and activity still add into the totals. \`categories\` and \`groups\` narrow the report, by id or name — a whole name first, else a part that only one entity contains — and \`filters\` in the response names what they resolved to.
+The window is the last six months ending at the current one. Rows come most-overspent first, by amount, then biggest spender; categories that are zero throughout are counted in \`categories_omitted\`. Hidden categories are kept and marked \`hidden\`. Credit card payment categories are kept and marked \`credit_card_payment\`: their activity is card spending moved onto them minus payments, not spending. The current month is \`partial_month\`, left out of both counts unless \`include_partial\` is set, though its figures still add into the totals. \`filters\` names what \`categories\` and \`groups\` resolved to.
 
 ${SHARED_NOTES}`;
 
@@ -25,11 +25,11 @@ export function registerBudgetVsActual(server: McpServer, store: BudgetStore): v
         months: z.number().int().positive().max(MAX_MONTHS).optional().describe(`How many months the window covers, ending at the current month. Defaults to 6, at most ${MAX_MONTHS}.`),
         start: z.string().optional().describe("First month of the window, `YYYY-MM`. Wins over `months`."),
         end: z.string().optional().describe("Last month of the window, `YYYY-MM`, inclusive. Wins over `months`; defaults to the current month."),
-        categories: z.array(z.string()).optional().describe("Only these categories, by id or name."),
-        groups: z.array(z.string()).optional().describe("Only the categories in these category groups, by id or name."),
+        categories: z.array(z.string()).optional().describe(`Only these categories. ${BY_ID_OR_NAME}`),
+        groups: z.array(z.string()).optional().describe(`Only the categories in these category groups. ${BY_ID_OR_NAME}`),
         include_months: z.boolean().optional().describe("Add each category's month-by-month assigned, activity and available. Off by default."),
-        include_partial: z.boolean().optional().describe("Count the current, unfinished month in `overspent_months` and `over_assigned_months`. Off by default."),
-        refresh: z.boolean().optional().describe("Pull the latest changes from YNAB before reporting, even if the cache is recent."),
+        include_partial: z.boolean().optional().describe("Count the current, unfinished month in `overspent_months`, `overspent` and `over_assigned_months`. Off by default."),
+        refresh: z.boolean().optional().describe(REFRESH),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -70,8 +70,8 @@ function buildComparison(context: ToolContext, args: ComparisonArgs): Report {
   }
 
   let omitted = 0;
-  // The milliunit activity travels beside the rendered row: the sort is on the figure, not its rendering.
-  const ranked: { row: Report; activity: number }[] = [];
+  // The milliunit figures travel beside the rendered row: the sort is on the figures, not their rendering.
+  const ranked: { row: Report; overspent: number; activity: number }[] = [];
   for (const bucket of buckets.values()) {
     // A category that was never assigned to, never spent in and never carried a balance has
     // nothing to compare; padding the report with its zeroes would only bury the rest.
@@ -97,7 +97,12 @@ function buildComparison(context: ToolContext, args: ComparisonArgs): Report {
       activity: context.money(activity),
     };
     if (endRow) report.available = context.money(endRow.balance);
-    report.overspent_months = counted.filter((row) => row.balance < 0).length;
+    const inTheRed = counted.filter((row) => row.balance < 0);
+    report.overspent_months = inTheRed.length;
+    // How far into the red, summed over those months: three months a little over and one month far
+    // over are different answers, and the count alone cannot tell them apart.
+    const overspent = -sum(inTheRed.map((row) => row.balance));
+    if (overspent > 0) report.overspent = context.money(overspent);
     report.over_assigned_months = counted.filter((row) => -row.activity > row.budgeted).length;
     if (last.hidden) report.hidden = true;
     if (last.creditCardPayment) report.credit_card_payment = true;
@@ -113,13 +118,15 @@ function buildComparison(context: ToolContext, args: ComparisonArgs): Report {
         return point;
       });
     }
-    ranked.push({ row: report, activity });
+    ranked.push({ row: report, overspent, activity });
   }
 
-  // Most overspent first, then the biggest spender: activity is negative for spending, so ascending.
+  // Most overspent first — by how far into the red, then how often — then the biggest spender:
+  // activity is negative for spending, so ascending.
   const byCategoryName = byName<Report>((row) => row.name as string);
   ranked.sort(
     (a, b) =>
+      b.overspent - a.overspent ||
       (b.row.overspent_months as number) - (a.row.overspent_months as number) ||
       a.activity - b.activity ||
       byCategoryName(a.row, b.row),

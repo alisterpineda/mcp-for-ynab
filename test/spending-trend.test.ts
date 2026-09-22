@@ -129,7 +129,8 @@ describe("spending_trend", () => {
   });
 
   it("covers six months ending at the current one by default", async () => {
-    await using h = await spending();
+    // A budget old enough that the default window sits wholly inside its history.
+    await using h = await harness({ budget: spendingBudget({ first_month: "2020-01-01" }) });
     const body = await h.json("spending_trend", { categories: ["Groceries"] });
     assert.equal(body.start, monthFromNow(-5));
     assert.equal(body.end, monthFromNow(0));
@@ -188,6 +189,49 @@ describe("spending_trend and the month still being lived in", () => {
     const body = await h.json("spending_trend", { categories: ["Groceries"], start: "2026-07", end: "2026-08" });
     assert.ok(!("partial_month" in body), "the window is over; no month in it is still moving");
     assert.ok(seriesOf(body)[0].months.every((point) => !("partial" in point)));
+  });
+});
+
+describe("spending_trend and the budget's history", () => {
+  it("cuts a window that reaches back before the budget, so the average is over real months", async () => {
+    await using h = await spending();
+    // The fixture's budget starts in 2026-07; April to June would be three zeroes it never lived.
+    const body = await h.json("spending_trend", { categories: ["Groceries"], start: "2026-04", end: "2026-08" });
+    assert.equal(body.start, "2026-07");
+    assert.equal(body.history_starts, "2026-07");
+    assert.deepEqual(seriesOf(body)[0].months, [
+      { month: "2026-07", spent: 50 },
+      { month: "2026-08", spent: 135 },
+    ]);
+    assert.equal(seriesOf(body)[0].average, 92.5, "not 37, which is 185 spread over five months");
+  });
+
+  it("says nothing about history when the window sits inside it", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_trend", { categories: ["Groceries"], start: "2026-07", end: "2026-08" });
+    assert.ok(!("history_starts" in body));
+  });
+
+  it("counts a transaction dated before the first budget month as history", async () => {
+    await using h = await harness({
+      budget: spendingBudget({
+        transactions: [...spendingBudget().transactions!, transaction("early", "2026-05-20", -40_000, { category_id: "c1" })],
+      }),
+    });
+    const body = await h.json("spending_trend", { categories: ["Groceries"], start: "2026-04", end: "2026-07" });
+    assert.equal(body.history_starts, "2026-05");
+    assert.deepEqual(seriesOf(body)[0].months, [
+      { month: "2026-05", spent: 40 },
+      { month: "2026-06", spent: 0 },
+      { month: "2026-07", spent: 50 },
+    ]);
+  });
+
+  it("refuses a window that ends before the budget begins, naming where it does", async () => {
+    await using h = await spending();
+    const { text, isError } = await h.call("spending_trend", { categories: ["Groceries"], start: "2026-01", end: "2026-03" });
+    assert.equal(isError, true);
+    assert.match(text, /history starts at 2026-07/);
   });
 });
 
