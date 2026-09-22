@@ -31,7 +31,7 @@ only what changed since.
 - Several budgets can live in the same file, each with its own `server_knowledge`, so switching
   `YNAB_BUDGET_ID` keeps the other budget delta-synced. The account's budget list is cached too;
   `sync_status` shows the other budgets.
-- A file with a different schema version is rebuilt: all tables are dropped and a full sync refills them.
+- A file built from a different schema is rebuilt: all tables are dropped and a full sync refills them.
 
 Data is as current as YNAB is. Bank imports happen inside YNAB, usually when the app is opened,
 and cannot be triggered from the API.

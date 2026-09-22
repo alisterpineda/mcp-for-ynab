@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
@@ -19,9 +20,6 @@ import type {
   Transaction,
 } from "../ynab/types.js";
 import { defaultDbPath } from "./paths.js";
-
-/** Bump when the schema changes; a mismatched file is rebuilt (all tables dropped) and refilled by a full sync. */
-export const SCHEMA_VERSION = 2;
 
 export interface DeltaStats {
   upserted: number;
@@ -651,30 +649,64 @@ export class BudgetDb {
   }
 
   /**
-   * Create the schema, or rebuild it when the stored version differs or a table is missing. Tables
-   * are dropped rather than the file deleted so `:memory:` and file databases behave the same and
-   * the WAL sidecars are never raced.
+   * Create the schema, or rebuild it when the file does not match this build. Tables are dropped
+   * rather than the file deleted so `:memory:` and file databases behave the same and the WAL
+   * sidecars are never raced.
    */
   private ensureSchema(): void {
     this.db.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-    const version = this.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
+    if (this.schemaMatches()) return;
+
+    this.transaction(() => {
+      // Another process may have rebuilt the file while we waited for the write lock; BEGIN
+      // IMMEDIATE reads the state it committed, so a second rebuild would only discard its work.
+      if (this.schemaMatches()) return;
+      // Children before `budgets`: foreign keys are on, and DROP TABLE enforces them.
+      for (const table of [...ALL_TABLES].reverse()) this.db.exec(`DROP TABLE IF EXISTS ${table}`);
+      this.db.exec(schemaDdl());
+      this.db.prepare("INSERT INTO meta (key, value) VALUES ('schema_fingerprint', ?)").run(schemaFingerprint());
+    });
+  }
+
+  /** True when the file carries this build's schema and every table it expects is present. */
+  private schemaMatches(): boolean {
+    const stored = this.db.prepare("SELECT value FROM meta WHERE key = 'schema_fingerprint'").get();
+    if (stored?.value !== schemaFingerprint()) return false;
     const existing = new Set(
       this.db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
         .all()
         .map((r) => r.name as string),
     );
-    if (version?.value === String(SCHEMA_VERSION) && ALL_TABLES.every((t) => existing.has(t))) return;
-
-    this.transaction(() => {
-      for (const table of [...ALL_TABLES].reverse()) this.db.exec(`DROP TABLE IF EXISTS ${table}`);
-      this.db.exec(schemaDdl());
-      this.db.exec(`INSERT INTO meta (key, value) VALUES ('schema_version', '${SCHEMA_VERSION}')`);
-    });
+    return ALL_TABLES.every((t) => existing.has(t));
   }
 }
 
-function schemaDdl(): string {
+let fingerprint: string | null = null;
+
+/**
+ * Bump when a change alters what is written into columns whose DDL is unchanged: a reworked value
+ * extractor, row key or flattening rule. Those live outside `schemaDdl()`, so nothing else can
+ * invalidate a cache still holding rows the old logic wrote.
+ */
+const CACHE_EPOCH = 1;
+
+/**
+ * A digest of the DDL this build generates, plus `CACHE_EPOCH`. Every change to a table, column or
+ * index changes this too, and a file that does not carry it is rebuilt (all tables dropped) and
+ * refilled by a full sync. Only a change to how rows are populated needs the epoch bumped by hand.
+ */
+export function schemaFingerprint(): string {
+  fingerprint ??= digestSchema(schemaDdl());
+  return fingerprint;
+}
+
+/** The digest of one schema. Exported so a test can pin `schemaFingerprint` to the DDL it claims to cover. */
+export function digestSchema(ddl: string): string {
+  return createHash("sha256").update(ddl).update(String(CACHE_EPOCH)).digest("hex").slice(0, 16);
+}
+
+export function schemaDdl(): string {
   const ddl: string[] = [
     "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     `CREATE TABLE budgets (

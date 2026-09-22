@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { BudgetDb, SCHEMA_VERSION } from "../src/cache/db.js";
+import { BudgetDb, digestSchema, schemaDdl, schemaFingerprint } from "../src/cache/db.js";
 import { BUDGET_ID, budgetDetail, category, fullBudget, month, subtransaction, transaction } from "./fixtures.js";
 
 const NOW = new Date("2026-09-21T14:00:00Z");
@@ -338,8 +338,29 @@ describe("BudgetDb.summary date range", () => {
   });
 });
 
+describe("schemaFingerprint", () => {
+  it("changes when any column or index in the generated schema changes", () => {
+    const ddl = schemaDdl();
+    assert.equal(digestSchema(ddl), schemaFingerprint(), "the build's digest is taken over the generated DDL");
+
+    assert.ok(ddl.includes("cleared TEXT NOT NULL"), "the DDL still spells the column this test mutates");
+    assert.notEqual(
+      digestSchema(ddl.replace("cleared TEXT NOT NULL", "cleared TEXT")),
+      schemaFingerprint(),
+      "a changed column changes the digest",
+    );
+
+    assert.ok(ddl.includes("CREATE INDEX month_categories_by_category"), "the DDL still spells the index this test mutates");
+    assert.notEqual(
+      digestSchema(ddl.replace("CREATE INDEX month_categories_by_category", "CREATE INDEX mc_by_category")),
+      schemaFingerprint(),
+      "a changed index changes the digest",
+    );
+  });
+});
+
 describe("BudgetDb on disk", () => {
-  it("persists across reopen and rebuilds on a schema version mismatch", async () => {
+  it("persists across reopen and rebuilds when the file does not carry this build's schema", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "ynab-mcp-db-"));
     const file = path.join(dir, "nested", "ynab.sqlite");
     try {
@@ -354,9 +375,12 @@ describe("BudgetDb on disk", () => {
       assert.equal(reopened.summary(BUDGET_ID).transactions, 3);
       reopened.close();
 
-      const raw = new DatabaseSync(file);
-      raw.exec(`UPDATE meta SET value = '${SCHEMA_VERSION + 1}' WHERE key = 'schema_version'`);
-      raw.close();
+      const stored = new DatabaseSync(file);
+      const fingerprint = stored.prepare("SELECT value FROM meta WHERE key = 'schema_fingerprint'").get();
+      assert.equal(fingerprint?.value, schemaFingerprint(), "the file records the schema it was built from");
+      // Stand in for a build whose DDL differs from this one's.
+      stored.exec("UPDATE meta SET value = 'stale' WHERE key = 'schema_fingerprint'");
+      stored.close();
 
       const rebuilt = new BudgetDb(file);
       assert.equal(rebuilt.budgetRow(BUDGET_ID), null, "old data is dropped");
