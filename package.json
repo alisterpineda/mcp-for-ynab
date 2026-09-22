@@ -1,6 +1,6 @@
 {
   "name": "ynab-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server for YNAB, packaged as a Claude Desktop extension",
   "private": true,
   "license": "MIT",

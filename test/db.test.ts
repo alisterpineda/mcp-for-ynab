@@ -5,7 +5,7 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { BudgetDb, digestSchema, schemaDdl, schemaFingerprint } from "../src/cache/db.js";
-import { BUDGET_ID, budgetDetail, category, fullBudget, month, subtransaction, transaction } from "./fixtures.js";
+import { BUDGET_ID, budgetDetail, category, fullBudget, month, orientationBudget, subtransaction, transaction } from "./fixtures.js";
 
 const NOW = new Date("2026-09-21T14:00:00Z");
 const LATER = new Date("2026-09-21T15:00:00Z");
@@ -302,7 +302,7 @@ describe("BudgetDb.transactionLines", () => {
       BUDGET_ID,
       budgetDetail({
         months: [
-          month("2026-09-01", [], { income: 1_000, budgeted: 2_000, activity: -3_000, to_be_budgeted: 4_000, age_of_money: 12 }),
+          month("2026-09-01", [], { income: 1_000, budgeted: 2_000, activity: -3_000, to_be_budgeted: 4_000, age_of_money: 12, note: "September" }),
           month("2026-08-01", [], { income: 10, budgeted: 20, activity: -30, to_be_budgeted: 40 }),
         ],
       }),
@@ -316,8 +316,10 @@ describe("BudgetDb.transactionLines", () => {
       activity: -3_000,
       toBeBudgeted: 4_000,
       ageOfMoney: 12,
+      note: "September",
     });
     assert.equal(db.month(BUDGET_ID, "2026-08-01")?.ageOfMoney, null, "age of money is optional");
+    assert.equal(db.month(BUDGET_ID, "2026-08-01")?.note, null, "so is the month note");
     assert.equal(db.month(BUDGET_ID, "2026-07-01"), null);
     assert.equal(db.month("budget-2", "2026-09-01"), null);
   });
@@ -335,6 +337,160 @@ describe("BudgetDb.summary date range", () => {
     db.applyBudget(BUDGET_ID, budgetDetail(), 1, NOW);
     assert.equal(db.summary(BUDGET_ID).earliest, null);
     assert.equal(db.summary(BUDGET_ID).latest, null);
+  });
+});
+
+function oriented(): BudgetDb {
+  const db = new BudgetDb(":memory:");
+  db.applyBudget(BUDGET_ID, orientationBudget(), 10, NOW);
+  return db;
+}
+
+describe("BudgetDb.categoryTree", () => {
+  it("stores the fields these tools report as real columns, not as raw JSON", () => {
+    const [food] = oriented().categoryTree(BUDGET_ID).filter((g) => g.name === "🥘 Food");
+    assert.deepEqual(food.categories.find((c) => c.name === "Groceries"), {
+      id: "c1",
+      name: "Groceries",
+      note: "costco run monthly",
+      goalType: "MF",
+      goalTarget: 800_000,
+      goalTargetDate: null,
+      goalSnoozedAt: null,
+      hidden: false,
+    });
+    assert.equal(food.categories.find((c) => c.name === "Café")?.goalSnoozedAt, "2026-09-01T00:00:00+00:00");
+  });
+
+  it("filters on the category's own internal flag, never the group's", () => {
+    const groups = oriented().categoryTree(BUDGET_ID);
+    assert.ok(!groups.some((g) => g.name === "Internal Master Category"));
+    assert.deepEqual(
+      groups.find((g) => g.name === "Credit Card Payments")?.categories.map((c) => c.name),
+      ["Visa"],
+      "the group is internal; its categories are not",
+    );
+  });
+
+  it("treats a hidden group's members as hidden", () => {
+    const withHidden = oriented().categoryTree(BUDGET_ID, { includeHidden: true });
+    const retired = withHidden.find((g) => g.name === "Hidden Stuff")!.categories[0];
+    assert.equal(retired.hidden, true, "its own flag is false, but its group is hidden");
+    assert.ok(!oriented().categoryTree(BUDGET_ID).some((g) => g.name === "Hidden Stuff"));
+  });
+
+  it("falls back to the category's own group name when the group is not cached", () => {
+    const db = new BudgetDb(":memory:");
+    db.applyBudget(
+      BUDGET_ID,
+      budgetDetail({ categories: [category("c9", "Orphan", { category_group_id: "missing", category_group_name: "From category" })] }),
+      1,
+      NOW,
+    );
+    assert.deepEqual(db.categoryTree(BUDGET_ID).map((g) => g.name), ["From category"]);
+  });
+});
+
+describe("BudgetDb.accountRows", () => {
+  it("returns the balance detail as columns, ordered by type then name", () => {
+    const listing = oriented().accountRows(BUDGET_ID);
+    assert.deepEqual(listing.accounts.map((a) => a.name), ["Chequing", "Visa", "Mortgage"]);
+    assert.equal(listing.closedOmitted, 1);
+    assert.deepEqual(listing.accounts[0], {
+      id: "a1",
+      name: "Chequing",
+      type: "checking",
+      onBudget: true,
+      closed: false,
+      balance: 1_234_560,
+      clearedBalance: 1_200_000,
+      unclearedBalance: 34_560,
+      lastReconciledAt: "2026-09-01T12:00:00+00:00",
+      note: "joint",
+    });
+  });
+
+  it("includes closed accounts on request and then omits none", () => {
+    const listing = oriented().accountRows(BUDGET_ID, { includeClosed: true });
+    assert.deepEqual(listing.accounts.map((a) => a.name), ["Chequing", "Visa", "Mortgage", "Old savings"], "by type: checking, creditCard, mortgage, savings");
+    assert.equal(listing.closedOmitted, 0);
+  });
+});
+
+describe("BudgetDb.monthDetail", () => {
+  it("joins each month category to its name and group, ordered by group then category", () => {
+    const detail = oriented().monthDetail(BUDGET_ID, "2026-09-01")!;
+    assert.equal(detail.note, "tight month");
+    assert.equal(detail.ageOfMoney, 108);
+    assert.deepEqual(
+      detail.categories.map((c) => [c.groupName, c.name]),
+      [
+        ["Credit Card Payments", "Visa"],
+        ["🥘 Food", "Café"],
+        ["🥘 Food", "Groceries"],
+        ["🥘 Food", "Old hobby"],
+        ["Hidden Stuff", "Retired thing"],
+        ["🏠 Housing", "Rent"],
+      ],
+    );
+    const groceries = detail.categories.find((c) => c.name === "Groceries")!;
+    assert.equal(groceries.goalUnderFunded, 12_500);
+    assert.equal(detail.categories.find((c) => c.name === "Old hobby")?.hidden, true);
+  });
+
+  it("leaves internal categories out so the rows still add up to the month's totals", () => {
+    const detail = oriented().monthDetail(BUDGET_ID, "2026-09-01")!;
+    assert.ok(!detail.categories.some((c) => c.name === "Inflow: Ready to Assign"));
+    assert.equal(detail.categories.reduce((sum, c) => sum + c.budgeted, 0), detail.budgeted);
+    assert.equal(detail.categories.reduce((sum, c) => sum + c.activity, 0), detail.activity);
+  });
+
+  it("is null for a month that is not cached", () => {
+    assert.equal(oriented().monthDetail(BUDGET_ID, "2025-05-01"), null);
+  });
+
+  it("keeps a month row whose category has since been deleted, so the rows still add up", () => {
+    const db = oriented();
+    const before = db.monthDetail(BUDGET_ID, "2026-09-01")!;
+    // A delta drops the category row but leaves the figures it already has in cached months.
+    db.applyBudget(BUDGET_ID, budgetDetail({ categories: [category("c1", "Groceries", { deleted: true })] }), 11, LATER);
+
+    const after = db.monthDetail(BUDGET_ID, "2026-09-01")!;
+    assert.equal(after.categories.length, before.categories.length, "an inner join would have swallowed the orphan");
+    assert.equal(
+      after.categories.reduce((sum, c) => sum + c.activity, 0),
+      after.activity,
+      "the rows must still reconcile with the month header, which still counts them",
+    );
+    const orphan = after.categories.find((c) => c.categoryId === "c1")!;
+    assert.equal(orphan.name, "(deleted category)", "named rather than dropped");
+    assert.equal(orphan.activity, before.categories.find((c) => c.categoryId === "c1")!.activity);
+  });
+});
+
+describe("the cache schema", () => {
+  it("carries the orientation columns", () => {
+    const ddl = schemaDdl();
+    for (const column of ["internal INTEGER NOT NULL", "goal_type TEXT", "goal_target INTEGER", "goal_target_date TEXT", "goal_snoozed_at TEXT"]) {
+      assert.ok(ddl.includes(column), `categories has ${column}`);
+    }
+    for (const column of ["cleared_balance INTEGER NOT NULL", "uncleared_balance INTEGER NOT NULL", "last_reconciled_at TEXT"]) {
+      assert.ok(ddl.includes(column), `accounts has ${column}`);
+    }
+    assert.ok(ddl.includes("age_of_money INTEGER, note TEXT"), "months has a note");
+    assert.ok(ddl.includes("goal_under_funded INTEGER"), "month_categories has the underfunded amount");
+  });
+
+  it("leaves category_groups alone, because the group's internal flag is never read", () => {
+    const statement = schemaDdl().split(";").find((part) => part.includes("CREATE TABLE category_groups"))!;
+    const columns = statement
+      .replace(/REFERENCES [^,]*/, "")
+      .replace(/PRIMARY KEY \([^)]*\)/, "")
+      .replace(/^[^(]*\(/, "")
+      .split(",")
+      .map((part) => part.trim().split(/\s+/)[0])
+      .filter((name) => /^[a-z_]+$/.test(name));
+    assert.deepEqual(columns, ["budget_id", "id", "name", "hidden"]);
   });
 });
 

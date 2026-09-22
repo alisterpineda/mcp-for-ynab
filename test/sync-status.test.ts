@@ -4,6 +4,7 @@ import { BudgetDb } from "../src/cache/db.js";
 import { BudgetStore } from "../src/cache/store.js";
 import { renderStatus } from "../src/tools/sync-status.js";
 import { BUDGET_ID, FakeBudgetSource } from "./fixtures.js";
+import { harness } from "./mcp.js";
 
 describe("renderStatus", () => {
   function makeStore(client: FakeBudgetSource, budgetId: string | null = null) {
@@ -61,5 +62,28 @@ describe("renderStatus", () => {
     const budget = await store.ensureFresh();
     const lines = renderStatus(store, budget, store.lastSync);
     assert.equal(lines.at(-1), 'Other budgets: "Business" (budget-2, not synced) — set Budget ID to switch', lines.join("\n"));
+  });
+});
+
+describe("the sync_status tool", () => {
+  it("re-downloads the whole budget on full_resync, rather than asking for a delta", async () => {
+    await using h = await harness();
+    h.source.delta = h.source.full;
+    await h.json("list_accounts"); // the first sync is the full download
+    await h.call("sync_status", { refresh: true }); // from here an ordinary sync is a delta
+    assert.notEqual(h.source.calls.at(-1)?.knowledge, undefined, "the next ordinary sync would be a delta");
+
+    const { isError } = await h.call("sync_status", { full_resync: true });
+    assert.equal(isError, false);
+    assert.equal(h.source.calls.at(-1)?.knowledge, undefined, "full_resync must ask YNAB for everything, not for changes");
+    assert.equal(h.db.summary(BUDGET_ID).accounts, 4, "and the cache is rebuilt, not left empty");
+  });
+
+  it("asks only for the changes on a plain refresh", async () => {
+    await using h = await harness();
+    await h.json("list_accounts");
+    const { isError } = await h.call("sync_status", { refresh: true });
+    assert.equal(isError, false);
+    assert.notEqual(h.source.calls.at(-1)?.knowledge, undefined);
   });
 });

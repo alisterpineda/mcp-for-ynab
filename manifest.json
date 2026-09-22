@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "ynab-mcp",
   "display_name": "YNAB",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server for YNAB (You Need A Budget).",
   "license": "MIT",
   "author": {
@@ -48,6 +48,18 @@
     }
   },
   "tools": [
+    {
+      "name": "list_categories",
+      "description": "Category groups and categories with their ids, notes and goals; search by category or group name. Month-independent."
+    },
+    {
+      "name": "list_accounts",
+      "description": "Open accounts split into on-budget and tracking, with balances, section totals and net worth."
+    },
+    {
+      "name": "get_month",
+      "description": "One month's income, assigned, activity, Ready to Assign and age of money, plus a per-category table with group subtotals."
+    },
     {
       "name": "sync_status",
       "description": "Budget name, last sync time, transaction count and date range; refresh: true pulls the latest from YNAB."

@@ -38,6 +38,26 @@ and cannot be triggered from the API.
 
 ## Tools
 
+All three orientation tools answer from the local cache and return compact JSON: amounts are bare
+numbers in the currency named once in the response envelope, the keys use YNAB's own words
+(`assigned`, `available`, `ready_to_assign`), and everything is ordered alphabetically rather than
+in YNAB's on-screen order, which the API does not expose. The one exception is `list_accounts`,
+which groups accounts by type first and orders by name inside each group.
+
+- `list_categories` — what exists and what it is for: category groups and categories with their
+  ids, notes and goal definitions. `search` matches part of a category or group name, ignoring
+  case and accents, and a group match returns that group's whole list. Hidden categories are left
+  out unless `include_hidden` is set; YNAB's internal categories are never listed. No money and
+  nothing month-dependent: this is where category ids come from.
+- `list_accounts` — where the money is: open accounts split into `on_budget` and `tracking`, each
+  section with its own total, plus `net_worth`. Balances come with their cleared and uncleared
+  parts and the last reconcile date. Closed accounts are counted in `closed_omitted` and returned
+  by `include_closed`; the totals always cover open accounts only.
+- `get_month` — how a month is going: income, assigned, activity, Ready to Assign and age of
+  money, plus categories nested under their group with subtotals that add up to the header.
+  Categories that are zero on all three figures are counted in `categories_omitted` instead of
+  listed. `month` is `YYYY-MM` and defaults to the current month; `refresh: true` pulls from YNAB
+  first. Deliberately carries no ids.
 - `sync_status` — budget name, last sync time, transaction count, date range, and sync health.
   `refresh: true` forces a delta sync; `full_resync: true` discards the cache and re-downloads everything.
 

@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { BudgetStore, SyncResult } from "../cache/store.js";
 import { isSynced, type SyncedBudget } from "../cache/db.js";
+import { freshBudget } from "./envelope.js";
 import { formatAge, formatLocalTime, freshnessLine } from "../freshness.js";
 
 const description = `Report the state of the local YNAB budget cache: budget name, when the data was last synced from YNAB, how many transactions are cached and the date range they cover, and any recent sync problem.
@@ -26,22 +27,9 @@ export function registerSyncStatus(server: McpServer, store: BudgetStore): void 
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ refresh, full_resync }) => {
-      let budget: SyncedBudget;
-      try {
-        if (full_resync) {
-          await store.fullResync();
-          budget = await store.ensureFresh();
-        } else {
-          budget = await store.ensureFresh({ force: refresh === true });
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return {
-          isError: true,
-          content: [{ type: "text", text: `No cached data and YNAB could not be reached: ${message}` }],
-        };
-      }
-      const text = [...renderStatus(store, budget, store.lastSync), "", freshnessLine(store, budget)].join("\n");
+      const fresh = await freshBudget(store, { force: refresh === true, fullResync: full_resync === true });
+      if (fresh.error) return fresh.error;
+      const text = [...renderStatus(store, fresh.budget, store.lastSync), "", freshnessLine(store, fresh.budget)].join("\n");
       return { content: [{ type: "text", text }] };
     },
   );

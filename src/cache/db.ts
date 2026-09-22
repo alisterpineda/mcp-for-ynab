@@ -19,6 +19,7 @@ import type {
   SubTransaction,
   Transaction,
 } from "../ynab/types.js";
+import { byName, fold } from "../format/text.js";
 import { defaultDbPath } from "./paths.js";
 
 export interface DeltaStats {
@@ -91,6 +92,7 @@ export interface MonthRow {
   activity: number;
   toBeBudgeted: number;
   ageOfMoney: number | null;
+  note: string | null;
 }
 
 export interface MonthCategoryRow {
@@ -98,6 +100,63 @@ export interface MonthCategoryRow {
   budgeted: number;
   activity: number;
   balance: number;
+  goalUnderFunded: number | null;
+}
+
+/** One category as `list_categories` sees it: structure and goal definition, never money. */
+export interface CategoryTreeCategory {
+  id: string;
+  name: string;
+  note: string | null;
+  goalType: string | null;
+  goalTarget: number | null;
+  goalTargetDate: string | null;
+  goalSnoozedAt: string | null;
+  /** True when the category is hidden, or sits in a hidden group. */
+  hidden: boolean;
+}
+
+export interface CategoryTreeGroup {
+  name: string;
+  categories: CategoryTreeCategory[];
+}
+
+export interface CategoryTreeOptions {
+  /** Substring of a category name or of its group's name, matched case- and accent-insensitively. */
+  search?: string;
+  /** Return hidden categories too, rather than leaving them out. */
+  includeHidden?: boolean;
+}
+
+export interface AccountRow {
+  id: string;
+  name: string;
+  type: string;
+  onBudget: boolean;
+  closed: boolean;
+  balance: number;
+  clearedBalance: number;
+  unclearedBalance: number;
+  lastReconciledAt: string | null;
+  note: string | null;
+}
+
+export interface AccountListing {
+  accounts: AccountRow[];
+  /** Closed accounts left out of `accounts`; zero when they were included. */
+  closedOmitted: number;
+}
+
+/** One category's figures for a month, with the names needed to report it. */
+export interface MonthCategoryDetail extends MonthCategoryRow {
+  name: string;
+  groupName: string;
+  /** True when the category is hidden, or sits in a hidden group. */
+  hidden: boolean;
+}
+
+export interface MonthDetail extends MonthRow {
+  categories: MonthCategoryDetail[];
 }
 
 export interface CacheSummary {
@@ -153,6 +212,10 @@ const ENTITY_TABLES: readonly EntityTable[] = [
       ["on_budget", "INTEGER NOT NULL", (e) => b(e.on_budget)],
       ["closed", "INTEGER NOT NULL", (e) => b(e.closed)],
       ["balance", "INTEGER NOT NULL", (e) => e.balance],
+      ["cleared_balance", "INTEGER NOT NULL", (e) => e.cleared_balance],
+      ["uncleared_balance", "INTEGER NOT NULL", (e) => e.uncleared_balance],
+      ["last_reconciled_at", "TEXT", (e) => e.last_reconciled_at ?? null],
+      ["note", "TEXT", (e) => e.note ?? null],
     ],
   }),
   entityTable<Payee>({
@@ -179,6 +242,12 @@ const ENTITY_TABLES: readonly EntityTable[] = [
       ["category_group_name", "TEXT", (e) => e.category_group_name ?? null],
       ["name", "TEXT NOT NULL", (e) => e.name],
       ["hidden", "INTEGER NOT NULL", (e) => b(e.hidden)],
+      ["internal", "INTEGER NOT NULL", (e) => b(e.internal)],
+      ["note", "TEXT", (e) => e.note ?? null],
+      ["goal_type", "TEXT", (e) => e.goal_type ?? null],
+      ["goal_target", "INTEGER", (e) => e.goal_target ?? null],
+      ["goal_target_date", "TEXT", (e) => e.goal_target_date ?? null],
+      ["goal_snoozed_at", "TEXT", (e) => e.goal_snoozed_at ?? null],
     ],
     indexes: ["(budget_id, category_group_id)"],
   }),
@@ -414,13 +483,13 @@ export class BudgetDb {
     const delMonth = this.stmt("DELETE FROM months WHERE budget_id = ? AND month = ?");
     const delMonthCategories = this.stmt("DELETE FROM month_categories WHERE budget_id = ? AND month = ?");
     const upsertMonth = this.stmt(
-      `INSERT OR REPLACE INTO months (budget_id, month, income, budgeted, activity, to_be_budgeted, age_of_money)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO months (budget_id, month, income, budgeted, activity, to_be_budgeted, age_of_money, note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const delCategory = this.stmt("DELETE FROM month_categories WHERE budget_id = ? AND month = ? AND category_id = ?");
     const upsertCategory = this.stmt(
-      `INSERT OR REPLACE INTO month_categories (budget_id, month, category_id, budgeted, activity, balance)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO month_categories (budget_id, month, category_id, budgeted, activity, balance, goal_under_funded)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
     const delMonthCategoryRaw = this.stmt("DELETE FROM raw WHERE budget_id = ? AND kind = ? AND id GLOB ?");
     for (const month of months) {
@@ -440,6 +509,7 @@ export class BudgetDb {
         month.activity,
         month.to_be_budgeted,
         month.age_of_money ?? null,
+        month.note ?? null,
       );
       this.putRaw(budgetId, RAW_MONTH, month.month, rest);
       stats.upserted++;
@@ -448,7 +518,7 @@ export class BudgetDb {
           delCategory.run(budgetId, month.month, c.id);
           this.deleteRaw(budgetId, RAW_MONTH_CATEGORY, monthCategoryKey(month.month, c.id));
         } else {
-          upsertCategory.run(budgetId, month.month, c.id, c.budgeted, c.activity, c.balance);
+          upsertCategory.run(budgetId, month.month, c.id, c.budgeted, c.activity, c.balance, c.goal_under_funded ?? null);
           this.putRaw(budgetId, RAW_MONTH_CATEGORY, monthCategoryKey(month.month, c.id), c);
         }
       }
@@ -555,31 +625,141 @@ export class BudgetDb {
 
   month(budgetId: string, month: string): MonthRow | null {
     const r = this.stmt(
-      "SELECT month, income, budgeted, activity, to_be_budgeted, age_of_money FROM months WHERE budget_id = ? AND month = ?",
+      "SELECT month, income, budgeted, activity, to_be_budgeted, age_of_money, note FROM months WHERE budget_id = ? AND month = ?",
     ).get(budgetId, month);
-    if (!r) return null;
-    return {
-      month: r.month as string,
-      income: Number(r.income),
-      budgeted: Number(r.budgeted),
-      activity: Number(r.activity),
-      toBeBudgeted: Number(r.to_be_budgeted),
-      ageOfMoney: r.age_of_money === null ? null : Number(r.age_of_money),
-    };
+    return r ? toMonthRow(r) : null;
   }
 
   monthCategories(budgetId: string, month: string): MonthCategoryRow[] {
     return this.stmt(
-      `SELECT category_id, budgeted, activity, balance FROM month_categories
+      `SELECT category_id, budgeted, activity, balance, goal_under_funded FROM month_categories
        WHERE budget_id = ? AND month = ? ORDER BY category_id`,
     )
       .all(budgetId, month)
-      .map((r) => ({
-        categoryId: r.category_id as string,
-        budgeted: Number(r.budgeted),
-        activity: Number(r.activity),
-        balance: Number(r.balance),
-      }));
+      .map(toMonthCategoryRow);
+  }
+
+  /**
+   * Category groups with their categories, ordered alphabetically and nested. Internal categories
+   * (`Inflow: Ready to Assign`, `Uncategorized`) are always left out — the filter is the category's
+   * own flag, never the group's, because YNAB marks the `Credit Card Payments` group internal while
+   * its five categories are not. Groups left with no categories are dropped.
+   */
+  categoryTree(budgetId: string, options: CategoryTreeOptions = {}): CategoryTreeGroup[] {
+    const rows = this.stmt(
+      `SELECT c.id, c.name, c.note, c.goal_type, c.goal_target, c.goal_target_date, c.goal_snoozed_at, c.hidden,
+              ${GROUP_COLUMNS}
+       FROM categories c
+       ${GROUP_JOIN}
+       WHERE c.budget_id = ? AND c.internal = 0`,
+    ).all(budgetId);
+
+    const term = options.search === undefined ? null : fold(options.search);
+    // A term that folds away to nothing — an emoji or whitespace on its own — matches nothing.
+    // Falling through to the unfiltered list would hand back the whole budget as "search results".
+    if (term === "") return [];
+    // A group-name hit returns that group's whole list, so the matching groups are settled first.
+    const matchedGroups = new Set<string>();
+    if (term) {
+      for (const r of rows) {
+        const group = r.group_name as string;
+        if (fold(group).includes(term)) matchedGroups.add(group);
+      }
+    }
+
+    const groups = new Map<string, CategoryTreeGroup>();
+    for (const r of rows) {
+      const hidden = isHidden(r);
+      if (hidden && !options.includeHidden) continue;
+      const groupName = r.group_name as string;
+      const name = r.name as string;
+      if (term && !matchedGroups.has(groupName) && !fold(name).includes(term)) continue;
+      let group = groups.get(groupName);
+      if (!group) {
+        group = { name: groupName, categories: [] };
+        groups.set(groupName, group);
+      }
+      group.categories.push({
+        id: r.id as string,
+        name,
+        note: (r.note as string | null) ?? null,
+        goalType: (r.goal_type as string | null) ?? null,
+        goalTarget: r.goal_target === null ? null : Number(r.goal_target),
+        goalTargetDate: (r.goal_target_date as string | null) ?? null,
+        goalSnoozedAt: (r.goal_snoozed_at as string | null) ?? null,
+        hidden,
+      });
+    }
+
+    const ordered = [...groups.values()].sort(byName((g) => g.name));
+    for (const group of ordered) group.categories.sort(byName((c) => c.name));
+    return ordered;
+  }
+
+  /** Accounts ordered by type then name, with the closed ones counted whether or not they are returned. */
+  accountRows(budgetId: string, options: { includeClosed?: boolean } = {}): AccountListing {
+    const rows = this.stmt(
+      `SELECT id, name, type, on_budget, closed, balance, cleared_balance, uncleared_balance, last_reconciled_at, note
+       FROM accounts WHERE budget_id = ?`,
+    )
+      .all(budgetId)
+      .map(
+        (r): AccountRow => ({
+          id: r.id as string,
+          name: r.name as string,
+          type: r.type as string,
+          onBudget: Number(r.on_budget) === 1,
+          closed: Number(r.closed) === 1,
+          balance: Number(r.balance),
+          clearedBalance: Number(r.cleared_balance),
+          unclearedBalance: Number(r.uncleared_balance),
+          lastReconciledAt: (r.last_reconciled_at as string | null) ?? null,
+          note: (r.note as string | null) ?? null,
+        }),
+      );
+
+    const closed = rows.filter((a) => a.closed).length;
+    const accounts = options.includeClosed ? rows : rows.filter((a) => !a.closed);
+    const byAccountName = byName<AccountRow>((a) => a.name);
+    accounts.sort((a, b) => a.type.localeCompare(b.type) || byAccountName(a, b));
+    return { accounts, closedOmitted: options.includeClosed ? 0 : closed };
+  }
+
+  /**
+   * One month's own totals with its category rows joined to their names and groups, ordered by
+   * group then category. Internal categories are left out here too, so the rows still add up to
+   * the month's totals: YNAB excludes `Inflow: Ready to Assign` from a month's `activity`.
+   * Null when the month is not cached.
+   */
+  monthDetail(budgetId: string, month: string): MonthDetail | null {
+    const monthRow = this.month(budgetId, month);
+    if (!monthRow) return null;
+    const categories = this.stmt(
+      // The category join is outer on purpose: deleting a category drops its `categories` row but
+      // leaves its rows in months already cached, and an inner join would silently swallow those
+      // figures while the header above still counts them — subtotals that cannot be reconciled.
+      `SELECT mc.category_id, mc.budgeted, mc.activity, mc.balance, mc.goal_under_funded,
+              COALESCE(c.name, '(deleted category)') AS name, COALESCE(c.hidden, 0) AS hidden,
+              ${GROUP_COLUMNS}
+       FROM month_categories mc
+       LEFT JOIN categories c ON c.budget_id = mc.budget_id AND c.id = mc.category_id
+       ${GROUP_JOIN}
+       WHERE mc.budget_id = ? AND mc.month = ? AND COALESCE(c.internal, 0) = 0`,
+    )
+      .all(budgetId, month)
+      .map(
+        (r): MonthCategoryDetail => ({
+          ...toMonthCategoryRow(r),
+          name: r.name as string,
+          groupName: r.group_name as string,
+          hidden: isHidden(r),
+        }),
+      );
+
+    const byCategory = byName<MonthCategoryDetail>((c) => c.name);
+    const byGroup = byName<MonthCategoryDetail>((c) => c.groupName);
+    categories.sort((a, b) => byGroup(a, b) || byCategory(a, b));
+    return { ...monthRow, categories };
   }
 
   summary(budgetId: string): CacheSummary {
@@ -735,12 +915,13 @@ export function schemaDdl(): string {
     `CREATE TABLE months (
        ${budgetFk}, month TEXT NOT NULL,
        income INTEGER NOT NULL, budgeted INTEGER NOT NULL, activity INTEGER NOT NULL, to_be_budgeted INTEGER NOT NULL,
-       age_of_money INTEGER,
+       age_of_money INTEGER, note TEXT,
        PRIMARY KEY (budget_id, month)
      )`,
     `CREATE TABLE month_categories (
        ${budgetFk}, month TEXT NOT NULL, category_id TEXT NOT NULL,
        budgeted INTEGER NOT NULL, activity INTEGER NOT NULL, balance INTEGER NOT NULL,
+       goal_under_funded INTEGER,
        PRIMARY KEY (budget_id, month, category_id)
      )`,
     "CREATE INDEX month_categories_by_category ON month_categories (budget_id, category_id, month)",
@@ -763,6 +944,43 @@ function budgetValues(budget: BudgetSummary | BudgetDetail): [string, string, Sq
     budget.currency_format ? JSON.stringify(budget.currency_format) : null,
     budget.date_format ? JSON.stringify(budget.date_format) : null,
   ];
+}
+
+function toMonthRow(r: Record<string, unknown>): MonthRow {
+  return {
+    month: r.month as string,
+    income: Number(r.income),
+    budgeted: Number(r.budgeted),
+    activity: Number(r.activity),
+    toBeBudgeted: Number(r.to_be_budgeted),
+    ageOfMoney: r.age_of_money === null ? null : Number(r.age_of_money),
+    note: (r.note as string | null) ?? null,
+  };
+}
+
+function toMonthCategoryRow(r: Record<string, unknown>): MonthCategoryRow {
+  return {
+    categoryId: r.category_id as string,
+    budgeted: Number(r.budgeted),
+    activity: Number(r.activity),
+    balance: Number(r.balance),
+    goalUnderFunded: r.goal_under_funded === null ? null : Number(r.goal_under_funded),
+  };
+}
+
+/**
+ * How a category resolves its group, stated once: `categoryTree` and `monthDetail` must agree
+ * about which group a category is in and whether it counts as hidden, or the two tools disagree
+ * about the same budget. The group row wins, the category's cached group name is the fallback,
+ * and a category whose group is gone is named rather than dropped.
+ */
+const GROUP_COLUMNS = `COALESCE(g.name, c.category_group_name, '(unknown group)') AS group_name,
+              COALESCE(g.hidden, 0) AS group_hidden`;
+const GROUP_JOIN = `LEFT JOIN category_groups g ON g.budget_id = c.budget_id AND g.id = c.category_group_id`;
+
+/** Hidden in YNAB's sense: the category's own flag, or its whole group being hidden. */
+function isHidden(r: Record<string, unknown>): boolean {
+  return Number(r.hidden) === 1 || Number(r.group_hidden) === 1;
 }
 
 function toBudgetRow(r: Record<string, unknown>): BudgetRow {

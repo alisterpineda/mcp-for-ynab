@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import pkg from "../package.json" with { type: "json" };
 import { BudgetStore } from "./cache/store.js";
 import { BudgetDb } from "./cache/db.js";
-import { registerSyncStatus } from "./tools/sync-status.js";
+import { registerTools } from "./tools/index.js";
 import { YnabClient } from "./ynab/client.js";
 
 // stdout carries the MCP protocol; all logging goes to stderr.
@@ -29,7 +29,7 @@ const store = new BudgetStore({
 });
 
 const server = new McpServer({ name: "ynab-mcp", version });
-registerSyncStatus(server, store);
+registerTools(server, store);
 
 await server.connect(new StdioServerTransport());
 log(`started v${version}`);
