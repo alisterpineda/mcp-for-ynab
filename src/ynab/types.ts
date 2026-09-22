@@ -10,6 +10,7 @@ export type {
   DateFormat,
   MonthDetailBase as Month,
   Payee,
+  PayeeLocation,
   PlanDetail as BudgetDetail,
   PlanSummary as BudgetSummary,
   ScheduledSubTransactionBase as ScheduledSubTransaction,

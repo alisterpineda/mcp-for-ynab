@@ -1,13 +1,9 @@
 // Runs only when YNAB_ACCESS_TOKEN is set. Read-only: it never writes to the budget.
-// Costs three API requests per run against the 200/hour limit.
+// Costs four API requests per run against the 200/hour limit (budget list, full, delta, 401 check).
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { describe, it } from "node:test";
+import { BudgetDb } from "../../src/cache/db.js";
 import { BudgetStore } from "../../src/cache/store.js";
-import { CacheStorage } from "../../src/cache/storage.js";
-import { flattenTransactions } from "../../src/cache/views.js";
 import { YnabApiError, YnabClient } from "../../src/ynab/client.js";
 
 const token = process.env.YNAB_ACCESS_TOKEN;
@@ -15,32 +11,32 @@ const budgetId = process.env.YNAB_BUDGET_ID?.trim() || null;
 
 describe("YNAB API (live)", { skip: token ? false : "YNAB_ACCESS_TOKEN not set" }, () => {
   it("full sync, then a delta sync that returns the same or newer knowledge", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "ynab-mcp-live-"));
+    const db = new BudgetDb(":memory:");
     try {
       const client = new YnabClient(token!);
-      const store = new BudgetStore({ client, storage: new CacheStorage(dir), configuredBudgetId: budgetId, ttlMs: 0 });
+      const store = new BudgetStore({ client, db, configuredBudgetId: budgetId, ttlMs: 0 });
 
-      const cache = await store.ensureFresh();
+      const budget = await store.ensureFresh();
       assert.equal(store.lastSync?.kind, "full");
-      assert.ok(cache.budget.name.length > 0);
-      assert.ok(cache.serverKnowledge > 0);
-      assert.ok(Object.keys(cache.accounts).length > 0, "a real budget has at least one account");
+      assert.ok(budget.name.length > 0);
+      assert.ok(budget.serverKnowledge > 0);
+      const summary = db.summary(budget.id);
+      assert.ok(summary.accounts > 0, "a real budget has at least one account");
+      assert.ok(db.budgetRows().some((b) => b.id === budget.id), "the budget list includes the synced budget");
 
-      const lines = flattenTransactions(cache);
-      for (const line of lines.slice(0, 50)) {
+      const lines = db.transactionLines(budget.id, { limit: 50 });
+      for (const line of lines) {
         assert.match(line.date, /^\d{4}-\d{2}-\d{2}$/);
         assert.notEqual(line.accountName, "(unknown account)", "every transaction's account is in the cache");
+        if (line.parentId !== null) assert.notEqual(line.parentId, line.id, "a split line points at its parent, not itself");
       }
-      for (const sub of Object.values(cache.subtransactions)) {
-        assert.ok(sub.transaction_id in cache.transactions, "every split line has its parent cached");
-      }
+      if (summary.splitLines > 0) assert.ok(summary.splitParents > 0, "split lines have their parents cached");
 
-      const before = cache.serverKnowledge;
       const delta = await store.sync();
       assert.equal(delta.kind, "delta");
-      assert.ok(cache.serverKnowledge >= before);
+      assert.ok(db.budgetRow(budget.id)!.serverKnowledge! >= budget.serverKnowledge);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      db.close();
     }
   });
 

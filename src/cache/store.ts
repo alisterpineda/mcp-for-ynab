@@ -1,7 +1,6 @@
 import { YnabApiError, type BudgetSource } from "../ynab/client.js";
-import { applyDelta, buildCache, type DeltaStats } from "./delta.js";
-import { countEntities, type CacheData } from "./schema.js";
-import { CacheStorage } from "./storage.js";
+import type { BudgetSummary } from "../ynab/types.js";
+import { isSynced, type BudgetDb, type DeltaStats, type SyncedBudget } from "./db.js";
 
 export const DEFAULT_TTL_MS = 5 * 60 * 1000;
 
@@ -19,7 +18,7 @@ export interface SyncFailure {
 
 export interface StoreOptions {
   client: BudgetSource;
-  storage: CacheStorage;
+  db: BudgetDb;
   /** Budget id to sync. When null, YNAB's default (last-used) budget is resolved on first sync. */
   configuredBudgetId: string | null;
   ttlMs?: number;
@@ -27,84 +26,98 @@ export interface StoreOptions {
 }
 
 /**
- * Owns the in-memory cache and the sync policy:
+ * Owns the sync policy for the active budget:
  * - `ensureFresh()` syncs only when the cache is older than the TTL, and fails soft when a cache exists.
- * - `sync()` always talks to YNAB (delta when possible, full otherwise).
+ * - `sync()` always talks to YNAB (delta when the budget has been synced before, full otherwise).
  * - Concurrent callers share one in-flight sync.
+ * Tools read the data through `db`.
  */
 export class BudgetStore {
-  private cache: CacheData | null = null;
-  private loading: Promise<void> | null = null;
+  readonly db: BudgetDb;
+  private activeBudgetId: string | null;
+  private readonly configuredBudgetId: string | null;
+  private resolving: Promise<string> | null = null;
+  /** YNAB's new default budget, adopted as active only once its first sync succeeds. */
+  private pendingDefault: string | null = null;
+  private budgetList: Promise<void> | null = null;
+  private lastList: { budgets: BudgetSummary[]; defaultBudget: BudgetSummary | null } | null = null;
   private inFlight: Promise<SyncResult> | null = null;
-  private resolvedBudgetId: string | null;
   private readonly ttlMs: number;
   private readonly log: (message: string) => void;
   private readonly client: BudgetSource;
-  private readonly storage: CacheStorage;
 
   lastFailure: SyncFailure | null = null;
   lastSync: SyncResult | null = null;
 
   constructor(options: StoreOptions) {
     this.client = options.client;
-    this.storage = options.storage;
-    this.resolvedBudgetId = options.configuredBudgetId;
+    this.db = options.db;
+    this.configuredBudgetId = options.configuredBudgetId;
     this.ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
     this.log = options.log ?? (() => {});
+
+    // A configured id wins. Otherwise a previously chosen budget that is already synced keeps an
+    // offline start purely local; anything else is resolved against YNAB on the first sync.
+    const remembered = this.db.activeBudgetId();
+    this.activeBudgetId = options.configuredBudgetId ?? (remembered && isSynced(this.db.budgetRow(remembered)) ? remembered : null);
+    const current = this.current();
+    if (current) this.log(`loaded cache for "${current.name}" (knowledge ${current.serverKnowledge})`);
+    else this.log("no cached budget; first sync will pull the full budget");
   }
 
-  get cacheFilePath(): string {
-    return this.storage.filePath;
+  get dbPath(): string {
+    return this.db.path;
   }
 
   get rateLimit() {
     return this.client.lastRateLimit;
   }
 
-  /** Age of the cached data in milliseconds, or null when there is no cache. */
+  /** Age of the active budget's cached data in milliseconds, or null when it has not been synced. */
   ageMs(now = new Date()): number | null {
-    if (!this.cache) return null;
-    return now.getTime() - Date.parse(this.cache.lastSyncedAt);
+    const current = this.current();
+    return current ? now.getTime() - Date.parse(current.lastSyncedAt) : null;
   }
 
   /**
-   * Return a cache no older than the TTL, syncing first if needed. If the sync fails and a cache
-   * exists, the stale cache is returned and the failure is recorded in `lastFailure`.
-   * Throws only when there is no cache at all and YNAB cannot be reached.
+   * Return the active budget, synced no longer ago than the TTL if possible. If the sync fails and
+   * the budget has been synced before, the stale row is returned and the failure is recorded in
+   * `lastFailure`. Throws only when there is no cache at all and YNAB cannot be reached.
    */
-  async ensureFresh(options: { force?: boolean } = {}): Promise<CacheData> {
-    await this.loadFromDisk();
+  async ensureFresh(options: { force?: boolean } = {}): Promise<SyncedBudget> {
     const age = this.ageMs();
     const stale = age === null || age >= this.ttlMs;
     if (options.force || stale) {
       try {
         await this.sync();
       } catch (error) {
-        if (!this.cache) throw error;
+        if (!this.current()) throw error;
         // Fail soft: answer from the last successful sync. The failure is already recorded.
       }
     }
-    return this.cache!;
+    return this.current()!;
   }
 
   /** True when the most recent sync attempt failed after the last successful one, i.e. the cache is stale because of it. */
   get failedSinceLastSync(): SyncFailure | null {
     const failure = this.lastFailure;
-    if (!failure || !this.cache) return null;
-    return failure.at.getTime() > Date.parse(this.cache.lastSyncedAt) ? failure : null;
+    const current = this.current();
+    if (!failure || !current) return null;
+    return failure.at.getTime() > Date.parse(current.lastSyncedAt) ? failure : null;
   }
 
-  /** Discard the cache on disk and in memory, then pull the full budget again. */
+  /** Discard the active budget's cached data, then pull the full budget again. */
   async fullResync(): Promise<SyncResult> {
-    await this.loadFromDisk();
-    // A sync started against the old cache would write into it after we drop it; let it settle first.
+    await this.resolveActive();
+    // The list may switch the active budget; clear the budget the sync will actually download.
+    await this.refreshBudgetList();
+    // A sync started against the old data would write into it after we drop it; let it settle first.
     if (this.inFlight) await this.inFlight.catch(() => {});
-    this.cache = null;
-    await this.storage.remove();
+    this.db.clearBudget(this.syncTarget());
     return this.sync();
   }
 
-  /** Talk to YNAB now: delta if a cache exists, otherwise full. Shares an in-flight sync. */
+  /** Talk to YNAB now: delta if the budget was synced before, otherwise full. Shares an in-flight sync. */
   sync(): Promise<SyncResult> {
     if (!this.inFlight) {
       this.inFlight = this.runSync().finally(() => {
@@ -114,34 +127,31 @@ export class BudgetStore {
     return this.inFlight;
   }
 
+  private current(): SyncedBudget | null {
+    if (!this.activeBudgetId) return null;
+    const row = this.db.budgetRow(this.activeBudgetId);
+    return isSynced(row) ? row : null;
+  }
+
   private async runSync(): Promise<SyncResult> {
     const started = Date.now();
     try {
-      await this.loadFromDisk();
-      const budgetId = await this.resolveBudgetId();
-      const now = new Date();
-      let result: SyncResult;
-
-      if (this.cache) {
-        const { budget, serverKnowledge } = await this.client.getBudget(budgetId, this.cache.serverKnowledge);
-        const stats = applyDelta(this.cache, budget, serverKnowledge, now);
-        result = { kind: "delta", stats, durationMs: Date.now() - started };
-      } else {
-        const { budget, serverKnowledge } = await this.client.getBudget(budgetId);
-        this.cache = buildCache(budget, serverKnowledge, now);
-        const stats = { upserted: countEntities(this.cache), deleted: 0 };
-        result = { kind: "full", stats, durationMs: Date.now() - started };
+      await this.resolveActive();
+      await this.refreshBudgetList();
+      const budgetId = this.syncTarget();
+      const knowledge = this.db.budgetRow(budgetId)?.serverKnowledge ?? undefined;
+      const { budget, serverKnowledge } = await this.client.getBudget(budgetId, knowledge);
+      const stats = this.db.applyBudget(budgetId, budget, serverKnowledge, new Date());
+      if (budgetId !== this.activeBudgetId) {
+        // Only now is the new default usable offline; until here the previous budget kept serving.
+        this.activeBudgetId = budgetId;
+        this.pendingDefault = null;
+        this.db.setActiveBudgetId(budgetId);
       }
-
-      // An empty delta only moves lastSyncedAt; skip rewriting the whole file for that.
-      if (result.kind === "full" || result.stats.upserted + result.stats.deleted > 0) {
-        await this.storage.save(this.cache);
-      }
+      const result: SyncResult = { kind: knowledge === undefined ? "full" : "delta", stats, durationMs: Date.now() - started };
       this.lastSync = result;
       this.lastFailure = null;
-      this.log(
-        `${result.kind} sync ok: +${result.stats.upserted} -${result.stats.deleted} in ${result.durationMs}ms (knowledge ${this.cache.serverKnowledge})`,
-      );
+      this.log(`${result.kind} sync ok: +${stats.upserted} -${stats.deleted} in ${result.durationMs}ms (knowledge ${serverKnowledge})`);
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -152,40 +162,56 @@ export class BudgetStore {
     }
   }
 
-  /** Load the on-disk cache once. Concurrent callers await the same read, so none sees an empty cache mid-load. */
-  private loadFromDisk(): Promise<void> {
-    this.loading ??= this.readCacheFile();
-    return this.loading;
+  /** The budget the next sync downloads: a pending new default, otherwise the active budget. */
+  private syncTarget(): string {
+    return this.pendingDefault ?? this.activeBudgetId!;
   }
 
-  private async readCacheFile(): Promise<void> {
-    const result = await this.storage.load(this.resolvedBudgetId);
-    switch (result.kind) {
-      case "loaded":
-        this.cache = result.data;
-        this.resolvedBudgetId ??= result.data.budget.id;
-        this.log(`loaded cache for "${result.data.budget.name}" (knowledge ${result.data.serverKnowledge})`);
-        break;
-      case "missing":
-        this.log("no cache on disk; first sync will pull the full budget");
-        break;
-      case "discarded":
-        this.log(`discarding cache: ${result.reason}`);
-        await this.storage.remove();
-        break;
-    }
+  /** The active budget id, picking one from YNAB's list when neither config nor the cache names one. */
+  private resolveActive(): Promise<string> {
+    if (this.activeBudgetId) return Promise.resolve(this.activeBudgetId);
+    this.resolving ??= this.pickBudget().catch((error: unknown) => {
+      this.resolving = null;
+      throw error;
+    });
+    return this.resolving;
   }
 
-  private async resolveBudgetId(): Promise<string> {
-    if (this.resolvedBudgetId) return this.resolvedBudgetId;
-    const { budgets, defaultBudget } = await this.client.listBudgets();
+  private async pickBudget(): Promise<string> {
+    await this.refreshBudgetList();
+    const { budgets, defaultBudget } = this.lastList!;
     const chosen = defaultBudget ?? (budgets.length === 1 ? budgets[0] : null);
     if (!chosen) {
       const names = budgets.map((b) => `"${b.name}" (${b.id})`).join(", ");
       throw new Error(`Multiple budgets found and none is default; set YNAB_BUDGET_ID to one of: ${names}`);
     }
-    this.resolvedBudgetId = chosen.id;
+    this.activeBudgetId = chosen.id;
+    this.db.setActiveBudgetId(chosen.id);
     this.log(`using budget "${chosen.name}" (${chosen.id})`);
     return chosen.id;
+  }
+
+  /**
+   * Fetch the account's budget list once per process and record it, so `sync_status` can show the
+   * other budgets. Without a configured id, a changed YNAB default is queued to become the active
+   * budget once it has synced (see `runSync`), so a failed download never loses the current cache.
+   */
+  private refreshBudgetList(): Promise<void> {
+    this.budgetList ??= this.fetchBudgetList().catch((error: unknown) => {
+      this.budgetList = null;
+      throw error;
+    });
+    return this.budgetList;
+  }
+
+  private async fetchBudgetList(): Promise<void> {
+    const list = await this.client.listBudgets();
+    this.lastList = list;
+    this.db.upsertBudgetList(list.budgets, list.defaultBudget?.id ?? null, new Date());
+    const newDefault = list.defaultBudget;
+    if (this.configuredBudgetId === null && this.activeBudgetId && newDefault && newDefault.id !== this.activeBudgetId) {
+      this.log(`YNAB default budget is now "${newDefault.name}" (${newDefault.id}); switching from ${this.activeBudgetId}`);
+      this.pendingDefault = newDefault.id;
+    }
   }
 }

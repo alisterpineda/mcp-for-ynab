@@ -113,12 +113,15 @@ export interface FakeCall {
 }
 
 /**
- * In-memory stand-in for the YNAB API. A call without knowledge returns `full`; a call with
- * knowledge returns `delta`. Set `fail` to make the next calls throw.
+ * In-memory stand-in for the YNAB API. A budget call without knowledge returns `full`; a call with
+ * knowledge returns `delta`. Set `fail` to make every call throw.
  */
 export class FakeBudgetSource implements BudgetSource {
   lastRateLimit: RateLimit | null = { used: 1, limit: 200 };
   calls: FakeCall[] = [];
+  /** Number of `listBudgets` calls so far. */
+  listCalls = 0;
+  /** When set, every request (budget list and budget) throws it. */
   fail: Error | null = null;
   /** Override what `listBudgets` reports; by default the full plan is the only budget and the default. */
   budgetList: { budgets: { id: string; name: string }[]; defaultBudget: { id: string; name: string } | null } | null = null;
@@ -131,6 +134,8 @@ export class FakeBudgetSource implements BudgetSource {
   ) {}
 
   async listBudgets() {
+    this.listCalls++;
+    if (this.fail) throw this.fail;
     if (this.budgetList) return this.budgetList;
     const summary = { id: this.full.id, name: this.full.name };
     return { budgets: [summary], defaultBudget: summary };

@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import pkg from "../package.json" with { type: "json" };
 import { BudgetStore } from "./cache/store.js";
-import { CacheStorage } from "./cache/storage.js";
+import { BudgetDb } from "./cache/db.js";
 import { registerSyncStatus } from "./tools/sync-status.js";
 import { YnabClient } from "./ynab/client.js";
 
@@ -17,9 +17,13 @@ if (!token) {
 
 const version: string = pkg.version;
 
+const db = new BudgetDb();
+if (db.discardedCorruptFile) log(`discarded an unreadable cache file at ${db.path}; the next sync pulls the full budget`);
+process.on("exit", () => db.close());
+
 const store = new BudgetStore({
   client: new YnabClient(token),
-  storage: new CacheStorage(),
+  db,
   configuredBudgetId: process.env.YNAB_BUDGET_ID?.trim() || null,
   log,
 });

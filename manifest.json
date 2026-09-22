@@ -33,7 +33,7 @@
     "ynab_budget_id": {
       "type": "string",
       "title": "Budget ID (optional)",
-      "description": "Leave blank to use your default (last-used) budget. To pin one, open it at https://app.ynab.com and copy the UUID from the URL (https://app.ynab.com/<budget-id>/budget).",
+      "description": "Leave blank to use your default (last-used) budget, or the only budget on the account. Accounts with several budgets and no default must set this; the sync_status tool lists the ids. To pin one, open it at https://app.ynab.com and copy the UUID from the URL (https://app.ynab.com/<budget-id>/budget).",
       "required": false,
       "sensitive": false,
       "default": ""

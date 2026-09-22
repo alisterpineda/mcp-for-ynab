@@ -1,5 +1,5 @@
 import type { BudgetStore } from "./cache/store.js";
-import type { CacheData } from "./cache/schema.js";
+import type { SyncedBudget } from "./cache/db.js";
 
 export function formatLocalTime(date: Date, now = new Date()): string {
   const sameDay = date.toDateString() === now.toDateString();
@@ -23,8 +23,8 @@ export function formatAge(ms: number): string {
  * Trailing line for every tool response, e.g. "Data as of 2:14 PM." If the most recent sync
  * attempt failed, the line says so, so the reader knows the numbers come from the last good sync.
  */
-export function freshnessLine(store: BudgetStore, cache: CacheData, now = new Date()): string {
-  const syncedAt = new Date(cache.lastSyncedAt);
+export function freshnessLine(store: BudgetStore, budget: SyncedBudget, now = new Date()): string {
+  const syncedAt = new Date(budget.lastSyncedAt);
   let line = `Data as of ${formatLocalTime(syncedAt, now)}`;
   const failure = store.failedSinceLastSync;
   if (failure) {
