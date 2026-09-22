@@ -221,14 +221,18 @@ describe("get_month refresh", () => {
     assert.equal(h.source.calls.length, before + 1, "the forced sync already happened; the miss must not force a second");
   });
 
-  it("is offered by no other tool", async () => {
+  it("is offered only by the tools whose numbers move", async () => {
     await using h = await harness();
     const tools = (await h.client.listTools()).tools;
     const refreshable = tools
       .filter((tool) => Object.hasOwn((tool.inputSchema.properties ?? {}) as object, "refresh"))
       .map((tool) => tool.name)
       .sort();
-    assert.deepEqual(refreshable, ["get_month", "sync_status"], "sync_status is a health report, not an orientation tool");
+    assert.deepEqual(
+      refreshable,
+      ["budget_vs_actual", "get_month", "search_transactions", "spending_breakdown", "spending_trend", "sync_status"],
+      "the report tools whose numbers move, plus sync_status, which is a health report rather than an answer",
+    );
   });
 });
 

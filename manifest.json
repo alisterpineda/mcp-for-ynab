@@ -61,6 +61,22 @@
       "description": "One month's income, assigned, activity, Ready to Assign and age of money, plus a per-category table with group subtotals."
     },
     {
+      "name": "spending_breakdown",
+      "description": "Spending over a date range grouped by category, category group, payee, account or month, with shares, an `other` remainder and what the rule excluded."
+    },
+    {
+      "name": "spending_trend",
+      "description": "Month-by-month spending for named categories or category groups, with average, min and max over the complete months."
+    },
+    {
+      "name": "search_transactions",
+      "description": "Individual transaction lines filtered by date, category, payee, account, amount, direction or memo text, with the exact count and sum of every match."
+    },
+    {
+      "name": "budget_vs_actual",
+      "description": "Assigned against activity per category over a window of months, with available, overspent-month and over-assigned-month counts, from YNAB's own per-month figures."
+    },
+    {
       "name": "sync_status",
       "description": "Budget name, last sync time, transaction count and date range; refresh: true pulls the latest from YNAB."
     }

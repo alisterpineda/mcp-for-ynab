@@ -110,8 +110,12 @@ export async function respond(
 }
 
 /**
- * The four facts every orientation tool's description must state, because unsaid each one
- * produces a confidently wrong answer: what the numbers are, what the keys mean, where ids come
- * from, and what the ordering is.
+ * The four facts every tool's description must state, because unsaid each one produces a
+ * confidently wrong answer: what the numbers are, what the keys mean, where ids come from, and
+ * that the row order is the tool's own. The ordering itself is stated per tool, since the
+ * analysis tools each sort by something other than the name.
  */
-export const SHARED_NOTES = `Responses are compact JSON. Amounts are plain numbers in the currency named by \`currency\` in the envelope — no symbol, rendered at that currency's precision. The keys use YNAB's own words: \`assigned\` is Assigned, \`available\` is Available, \`ready_to_assign\` is Ready to Assign. Category and account ids come from \`list_categories\` and \`list_accounts\`; \`get_month\` deliberately carries no ids, so resolve a category through \`list_categories\` first. Everything is ordered alphabetically, which is not YNAB's on-screen order — never describe a row by its position; the one exception is \`list_accounts\`, which groups accounts by type first and orders by name inside each group. \`as_of\` is when the data was last synced from YNAB, and a \`warning\` key means the latest sync attempt failed and the figures come from the one before it.`;
+export const SHARED_NOTES = `Responses are compact JSON. Amounts are plain numbers in the currency named by \`currency\` in the envelope — no symbol, rendered at that currency's precision. The keys use YNAB's own words: \`assigned\` is Assigned, \`available\` is Available, \`ready_to_assign\` is Ready to Assign. Category and account ids come from \`list_categories\` and \`list_accounts\`; \`get_month\` deliberately carries no ids, so resolve a category through \`list_categories\` first. Each tool's description states its own row order, and none of them is YNAB's on-screen order — never describe a row by its position unless that order gives the position a meaning. \`as_of\` is when the data was last synced from YNAB, and a \`warning\` key means the latest sync attempt failed and the figures come from the one before it.`;
+
+/** The ordering the orientation tools share, appended after `SHARED_NOTES` by each of them. */
+export const ALPHABETICAL_ORDER = `Everything is ordered alphabetically, which is not YNAB's on-screen order; the one exception is \`list_accounts\`, which groups accounts by type first and orders by name inside each group.`;

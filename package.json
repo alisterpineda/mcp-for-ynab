@@ -11,6 +11,7 @@
   "scripts": {
     "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --alias:fetch-ponyfill=./src/shims/fetch-ponyfill.cjs --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outfile=server/index.js",
     "typecheck": "tsc --noEmit",
+    "reconcile": "node --import tsx scripts/reconcile-spending.ts",
     "inspect": "npm run build && npx @modelcontextprotocol/inspector node server/index.js",
     "pack": "npm run build && mcpb pack . ynab-mcp.mcpb",
     "test": "node --env-file-if-exists=.env --import tsx --test \"test/**/*.test.ts\""

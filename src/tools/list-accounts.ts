@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { AccountRow } from "../cache/db.js";
 import type { BudgetStore } from "../cache/store.js";
-import { respond, SHARED_NOTES, type Report, type ToolContext } from "./envelope.js";
+import { ALPHABETICAL_ORDER, respond, SHARED_NOTES, type Report, type ToolContext } from "./envelope.js";
 
 const description = `List the budget's accounts and what is in them: where the money actually sits. Accounts are split the way YNAB splits them — \`on_budget\` for the accounts whose money is being budgeted (chequing, savings, cash, credit cards) and \`tracking\` for the ones that are only watched (loans, mortgages, investments). Each section carries its own \`total\`, and \`net_worth\` is the two added together.
 
@@ -10,7 +10,7 @@ Each account carries \`balance\` (what YNAB shows), \`cleared_balance\` (what ha
 
 Closed accounts are left out and counted in \`closed_omitted\`; pass \`include_closed: true\` to see them, marked \`closed\`. The section totals and \`net_worth\` always cover open accounts only, whether or not the closed ones are listed.
 
-${SHARED_NOTES}`;
+${SHARED_NOTES} ${ALPHABETICAL_ORDER}`;
 
 export function registerListAccounts(server: McpServer, store: BudgetStore): void {
   server.registerTool(

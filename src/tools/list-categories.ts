@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { CategoryTreeCategory } from "../cache/db.js";
 import type { BudgetStore } from "../cache/store.js";
-import { respond, SHARED_NOTES, type Report, type ToolContext } from "./envelope.js";
+import { ALPHABETICAL_ORDER, respond, SHARED_NOTES, type Report, type ToolContext } from "./envelope.js";
 
 /** YNAB's goal codes are opaque enough that a silent misreading is plausible; spell them out. */
 const GOAL_TYPES: Record<string, string> = {
@@ -21,7 +21,7 @@ Use \`search\` to narrow the list: it matches part of a category name or part of
 
 This tool is deliberately month-independent: no assigned, available, activity or goal-progress figures appear here. Ask \`get_month\` for those. Hidden categories are left out unless \`include_hidden\` is set, and YNAB's internal categories ("Inflow: Ready to Assign", "Uncategorized") are never listed.
 
-${SHARED_NOTES}`;
+${SHARED_NOTES} ${ALPHABETICAL_ORDER}`;
 
 export function registerListCategories(server: McpServer, store: BudgetStore): void {
   server.registerTool(

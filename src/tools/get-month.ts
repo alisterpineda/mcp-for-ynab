@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { MonthCategoryDetail, MonthDetail } from "../cache/db.js";
 import type { BudgetStore } from "../cache/store.js";
-import { respond, SHARED_NOTES, ToolError, type Report, type ToolContext } from "./envelope.js";
+import { ALPHABETICAL_ORDER, respond, SHARED_NOTES, ToolError, type Report, type ToolContext } from "./envelope.js";
 
 const description = `Report one month of the budget: how much came in, how much was assigned, what was spent, and what is still available in each category. This is the tool for "how are we doing this month?" and for "how much is left for groceries?".
 
@@ -10,11 +10,11 @@ The header carries \`income\`, \`assigned\`, \`activity\` (spending, so normally
 
 Categories where assigned, activity and available are all zero are left out and counted in \`categories_omitted\`, so the list is shorter than the budget. A category hidden in YNAB still appears when it has figures, marked \`hidden\`.
 
-\`month\` is \`YYYY-MM\` and defaults to the current month; past and future months both work. Asking for a month outside the budget's history is an error naming the range; a month inside it that YNAB has not filled in yet reports zeroes with a \`status\` line saying so. Use \`refresh: true\` when the user says they just changed something in YNAB — it is the only report tool that offers it, because it is the only one whose numbers move that way (\`sync_status\` has it too, but for cache health rather than for an answer).
+\`month\` is \`YYYY-MM\` and defaults to the current month; past and future months both work. Asking for a month outside the budget's history is an error naming the range; a month inside it that YNAB has not filled in yet reports zeroes with a \`status\` line saying so. Use \`refresh: true\` when the user says they just changed something in YNAB — the report tools whose numbers move that way offer it (\`sync_status\` has it too, but for cache health rather than for an answer).
 
 This report deliberately carries no ids. To act on a particular category later, get its id from \`list_categories\`.
 
-${SHARED_NOTES}`;
+${SHARED_NOTES} ${ALPHABETICAL_ORDER}`;
 
 export function registerGetMonth(server: McpServer, store: BudgetStore): void {
   server.registerTool(

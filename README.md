@@ -38,11 +38,13 @@ and cannot be triggered from the API.
 
 ## Tools
 
-All three orientation tools answer from the local cache and return compact JSON: amounts are bare
+All the tools answer from the local cache and return compact JSON: amounts are bare
 numbers in the currency named once in the response envelope, the keys use YNAB's own words
-(`assigned`, `available`, `ready_to_assign`), and everything is ordered alphabetically rather than
-in YNAB's on-screen order, which the API does not expose. The one exception is `list_accounts`,
-which groups accounts by type first and orders by name inside each group.
+(`assigned`, `available`, `ready_to_assign`), and the listings are ordered alphabetically rather
+than in YNAB's on-screen order, which the API does not expose. Four exceptions: `list_accounts`
+groups accounts by type first and orders by name inside each group, `spending_breakdown` sorts
+its rows by amount spent, `search_transactions` returns its rows newest first, and
+`budget_vs_actual` puts the most overspent categories first.
 
 - `list_categories` — what exists and what it is for: category groups and categories with their
   ids, notes and goal definitions. `search` matches part of a category or group name, ignoring
@@ -58,6 +60,35 @@ which groups accounts by type first and orders by name inside each group.
   Categories that are zero on all three figures are counted in `categories_omitted` instead of
   listed. `month` is `YYYY-MM` and defaults to the current month; `refresh: true` pulls from YNAB
   first. Deliberately carries no ids.
+- `spending_breakdown` — where the money went: spending over a date range grouped by `category`
+  (the default), `category_group`, `payee`, `account` or `month`. Each row carries `spent`, the
+  line `count` and its `share` of the total; rows past the cap (25, or `limit`) are summed into
+  `other`, and a month grouping is zero-filled and never capped. `start` and `end` take
+  `YYYY-MM-DD` or `YYYY-MM` and default to the current month to date. The `categories`, `groups`,
+  `payees` and `accounts` filters take ids or exact names. The response states its `scope` — the
+  spending rule it applied — and counts what that rule dropped under `excluded`.
+- `spending_trend` — whether it is creeping up: a month-by-month series of spending for the
+  `categories` and `groups` you name (ids or exact names), one series each in the order asked,
+  a group series summing its categories. The window is the last six months ending at the current
+  one; `months` changes how many and `start`/`end` as `YYYY-MM` win over it. Months with no
+  activity read as zero, and each series carries `average`, `min` and `max` over the complete
+  months — the current month is flagged `partial` and left out unless `include_partial` is set.
+- `search_transactions` — the lines behind a number: transactions filtered by date, `categories`,
+  `groups`, `payees`, `accounts`, an absolute amount range (`min_amount`/`max_amount` in currency
+  units), `direction` and `text` (part of a memo or payee name). No spending rule applies, so
+  tracking accounts, transfers and income are all reachable; a split comes back as one row per
+  line with its `parent_id`. Rows keep YNAB's sign, come newest first and stop at `limit` (50 by
+  default, 200 at most), while `count` and `sum` always cover every match.
+- `budget_vs_actual` — where the plan and the spending disagree: one row per category over a
+  window of months with `assigned` and `activity` summed, `available` at the end of the last
+  month, and counts of the months that ended in the red (`overspent_months`) and the months where
+  spending ran past the assignment (`over_assigned_months`). It reads YNAB's own per-month
+  figures, so it cannot disagree with the budget screen. The window is the last six months ending
+  at the current one; `months` changes how many and `start`/`end` as `YYYY-MM` win over it.
+  Categories that are zero throughout are counted in `categories_omitted`; hidden and credit card
+  payment categories are kept and marked. `include_months` adds the per-month figures, and the
+  current month is flagged `partial_month` and left out of both counts unless `include_partial`
+  is set. `categories` and `groups` take ids or exact names.
 - `sync_status` — budget name, last sync time, transaction count, date range, and sync health.
   `refresh: true` forces a delta sync; `full_resync: true` discards the cache and re-downloads everything.
 
@@ -71,3 +102,12 @@ uses an in-memory database, and costs four API requests (budget list, full sync,
 an invalid-token check). Copy `.env.example` to `.env`
 and fill in your token; `npm test` loads it automatically. `.env` is git-ignored. Set
 `YNAB_BUDGET_ID` as well to test a budget other than your default one.
+
+### Reconciliation
+
+`npm run reconcile -- --from 2026-07 --to 2026-09` prints the spending breakdown per month, per
+category, from the real on-disk cache, so the totals can be compared to YNAB's own Spending report
+by hand. It is not a test and `npm test` never runs it: it asserts nothing and never syncs. It
+writes nothing but the schema, which means a cache from an older build is emptied on open and
+has to be synced again by the server before there is anything to reconcile. The range defaults
+to the last three months, and `--budget <id>` picks a budget other than the active one.

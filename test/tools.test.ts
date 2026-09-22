@@ -7,15 +7,36 @@ import pkg from "../package.json" with { type: "json" };
 import { harness } from "./mcp.js";
 
 const ORIENTATION_TOOLS = ["get_month", "list_accounts", "list_categories"];
+/** The analysis tools, which answer from the spending rule rather than describing the budget. */
+const SPENDING_TOOLS = ["spending_breakdown", "spending_trend", "search_transactions", "budget_vs_actual"];
+const DATA_TOOLS = [...ORIENTATION_TOOLS, ...SPENDING_TOOLS];
+
+/** What a tool is called with when the bare `{}` of the default sets is not a question it can answer. */
+const ARGUMENTS: Record<string, Record<string, unknown>[]> = {
+  // A trend of nothing in particular is not a trend, so the tool insists on a category or a group.
+  spending_trend: [{ categories: ["Groceries"] }],
+};
+const DEFAULT_ARGUMENTS = [{}, { include_hidden: true }, { include_closed: true }];
+
+/** The row order each tool promises, in its own words; the shared note only says the order is its own. */
+const ORDERING: Record<string, RegExp> = {
+  get_month: /ordered alphabetically, which is not YNAB's on-screen order/,
+  list_accounts: /ordered alphabetically, which is not YNAB's on-screen order/,
+  list_categories: /ordered alphabetically, which is not YNAB's on-screen order/,
+  spending_breakdown: /sorted by `spent` descending/,
+  spending_trend: /in chronological order/,
+  search_transactions: /Rows come newest first/,
+  budget_vs_actual: /Rows come most-overspent first/,
+};
 
 describe("the registered tools", () => {
-  it("registers the three orientation tools alongside sync_status", async () => {
+  it("registers the orientation and spending tools alongside sync_status", async () => {
     await using h = await harness();
     const names = (await h.client.listTools()).tools.map((tool) => tool.name).sort();
-    assert.deepEqual(names, [...ORIENTATION_TOOLS, "sync_status"]);
+    assert.deepEqual(names, [...DATA_TOOLS, "sync_status"].sort());
   });
 
-  it("annotates every orientation tool as read-only against an open world", async () => {
+  it("annotates every tool as read-only against an open world", async () => {
     await using h = await harness();
     for (const tool of (await h.client.listTools()).tools) {
       assert.equal(tool.annotations?.readOnlyHint, true, tool.name);
@@ -25,21 +46,22 @@ describe("the registered tools", () => {
 
   it("states in each description the four things that are wrong when left unsaid", async () => {
     await using h = await harness();
-    const tools = (await h.client.listTools()).tools.filter((tool) => ORIENTATION_TOOLS.includes(tool.name));
-    assert.equal(tools.length, 3);
+    const tools = (await h.client.listTools()).tools.filter((tool) => DATA_TOOLS.includes(tool.name));
+    assert.equal(tools.length, DATA_TOOLS.length);
     for (const { name, description = "" } of tools) {
       assert.match(description, /plain numbers in the currency named by `currency`/, `${name}: what the amounts are`);
       assert.match(description, /`assigned` is Assigned, `available` is Available, `ready_to_assign` is Ready to Assign/, `${name}: the vocabulary`);
       assert.match(description, /ids come from `list_categories`[\s\S]*`get_month` deliberately carries no ids/, `${name}: where ids come from`);
-      assert.match(description, /alphabetically, which is not YNAB's on-screen order/, `${name}: the ordering`);
+      assert.match(description, /states its own row order/, `${name}: that the order is the tool's own`);
+      assert.match(description, ORDERING[name], `${name}: the ordering`);
       assert.ok(description.length > 500, `${name}: a full description, not a one-liner`);
     }
   });
 
   it("never emits a null, because an absent value drops its key instead", async () => {
     await using h = await harness();
-    for (const tool of ORIENTATION_TOOLS) {
-      for (const args of [{}, { include_hidden: true }, { include_closed: true }]) {
+    for (const tool of DATA_TOOLS) {
+      for (const args of ARGUMENTS[tool] ?? DEFAULT_ARGUMENTS) {
         const { text, isError } = await h.call(tool, args);
         assert.equal(isError, false, `${tool} ${JSON.stringify(args)}: an error result carries no nulls either`);
         assert.ok(!text.includes("null"), `${tool} ${JSON.stringify(args)}: ${text.slice(0, 200)}`);
@@ -77,7 +99,7 @@ describe("the published version", () => {
   it("documents every registered tool in the README", async () => {
     const readme = await readFile(path.join(import.meta.dirname, "..", "README.md"), "utf8");
     const section = readme.slice(readme.indexOf("\n## Tools\n"));
-    for (const name of [...ORIENTATION_TOOLS, "sync_status"]) {
+    for (const name of [...DATA_TOOLS, "sync_status"]) {
       assert.ok(section.includes(`\`${name}\``), `the README's Tools section covers ${name}`);
     }
   });

@@ -84,6 +84,96 @@ export interface TransactionFilter {
   limit?: number;
 }
 
+/**
+ * Which lines a spending query looks at. `from`/`to` are inclusive ISO dates; the id lists are ORed
+ * within a list and ANDed across lists, and an empty or absent list constrains nothing.
+ */
+export interface SpendingFilter {
+  from?: string;
+  to?: string;
+  categoryIds?: string[];
+  groupIds?: string[];
+  payeeIds?: string[];
+  accountIds?: string[];
+}
+
+/**
+ * Which lines a search looks at: the spending filter plus the things only a drill-down asks for.
+ * `minAmount`/`maxAmount` are inclusive milliunit bounds on the line's absolute amount, so "between
+ * 20 and 50" reads the way a person says it whichever way the money went; `direction` then picks a
+ * side. `text` is a case-insensitive substring of the memo or the payee's name.
+ */
+export interface SearchFilter extends SpendingFilter {
+  minAmount?: number;
+  maxAmount?: number;
+  direction?: "outflow" | "inflow";
+  text?: string;
+  /** How many lines to return; the totals are unaffected. */
+  limit?: number;
+}
+
+/** One bucket of spending. `spent` is the raw milliunit sum, so ordinary spending is negative. */
+/** One entity's spending in one month, from `spendingByMonth`. */
+export interface MonthlySpending {
+  /** The category or category group id. */
+  key: string;
+  /** `YYYY-MM`. */
+  month: string;
+  /** Milliunits, negative for spending. */
+  spent: number;
+}
+
+export interface SpendingAggregate {
+  /**
+   * The grouping entity's id, the `YYYY-MM` when grouping by month, and null for the buckets that
+   * have no entity behind them: Uncategorized, `(deleted category)`, `(unknown group)`, `(no payee)`.
+   */
+  key: string | null;
+  name: string;
+  /** Category grouping only. */
+  groupName?: string;
+  /** Category grouping only: the category, or its group, is hidden. */
+  hidden?: boolean;
+  count: number;
+  spent: number;
+}
+
+export type SpendingGroupBy = "category" | "category_group" | "payee" | "account" | "month";
+
+/** Flattened lines in range that the spending rule dropped, counted once each. */
+export interface SpendingExclusions {
+  /** On a budget account, no category, transferring to another budget account. */
+  transfers: number;
+  /** On a tracking (off-budget) account. */
+  tracking: number;
+  /** In an internal category (`Inflow: Ready to Assign`). */
+  inflows: number;
+}
+
+/** Names or ids the caller wants turned into ids, one list per kind. */
+export interface EntityNames {
+  categories?: string[];
+  groups?: string[];
+  payees?: string[];
+  accounts?: string[];
+}
+
+/** The resolved ids. A key is present only when its list was present in the input. */
+export interface ResolvedEntities {
+  categoryIds?: string[];
+  groupIds?: string[];
+  payeeIds?: string[];
+  accountIds?: string[];
+}
+
+/** A name that matched no entity, or more than one. The message is written for the user to read. */
+export class NameResolutionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NameResolutionError";
+  }
+}
+
 /** One row of `months`: the month's own totals, without its categories. Amounts are milliunits. */
 export interface MonthRow {
   month: string;
@@ -157,6 +247,28 @@ export interface MonthCategoryDetail extends MonthCategoryRow {
 
 export interface MonthDetail extends MonthRow {
   categories: MonthCategoryDetail[];
+}
+
+/** Which categories a month-range report covers; both lists are ORed inside and ANDed across. */
+export interface MonthCategoryFilter {
+  categoryIds?: string[];
+  groupIds?: string[];
+}
+
+/** One category's figures for one month of a range, with the markers a report has to carry. */
+export interface MonthCategoryRangeRow {
+  /** `YYYY-MM`, the way a monthly report keys its months. */
+  month: string;
+  categoryId: string;
+  name: string;
+  groupName: string;
+  /** True when the category is hidden, or sits in a hidden group. */
+  hidden: boolean;
+  /** True when the category is one of YNAB's credit card payment categories. */
+  creditCardPayment: boolean;
+  budgeted: number;
+  activity: number;
+  balance: number;
 }
 
 export interface CacheSummary {
@@ -573,19 +685,7 @@ export class BudgetDb {
 
     // Filter, order and limit the lines first so the name lookups run only for the page returned.
     const sql = `
-      WITH lines AS (
-        SELECT t.id, NULL AS parent_id, t.date, t.amount, t.account_id, t.payee_id, t.category_id,
-               t.memo, t.transfer_account_id, t.cleared, t.approved, t.flag_color
-        FROM transactions t
-        WHERE t.budget_id = $b
-          AND NOT EXISTS (SELECT 1 FROM subtransactions s WHERE s.budget_id = t.budget_id AND s.transaction_id = t.id)
-        UNION ALL
-        SELECT s.id, t.id, t.date, s.amount, t.account_id, COALESCE(s.payee_id, t.payee_id), s.category_id,
-               COALESCE(s.memo, t.memo), s.transfer_account_id, t.cleared, t.approved, t.flag_color
-        FROM subtransactions s
-        JOIN transactions t ON t.budget_id = s.budget_id AND t.id = s.transaction_id
-        WHERE s.budget_id = $b
-      ),
+      WITH lines AS (${LINES_CTE}),
       page AS (
         SELECT * FROM lines l
         ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
@@ -601,26 +701,185 @@ export class BudgetDb {
       LEFT JOIN category_groups g ON g.budget_id = $b AND g.id = c.category_group_id
       ORDER BY l.date DESC, l.parent_id, l.id`;
 
+    return this.stmt(sql).all(params).map(toTransactionLine);
+  }
+
+  /**
+   * The spending lines in range: every flattened line on an on-budget account that either carries a
+   * non-internal category, or carries no category and is not a transfer. A categorized transfer to
+   * a tracking account stays (YNAB counts it as spending); a transfer between budget accounts, a
+   * line on a tracking account and an inflow all drop out. A line whose category id no longer
+   * resolves stays too, named `(deleted category)`, so the total still reconciles.
+   */
+  spendingLines(budgetId: string, filter: SpendingFilter = {}): TransactionLine[] {
+    const { where, params } = spendingWhere(budgetId, filter);
+    const sql = `
+      WITH lines AS (${LINES_CTE})
+      SELECT l.*, a.name AS account_name, p.name AS payee_name,
+             ${CATEGORY_NAME} AS category_name, ${CATEGORY_GROUP_NAME} AS category_group_name
+      ${SPENDING_FROM}
+      WHERE ${[SPENDING_RULE, ...where].join(" AND ")}
+      ORDER BY l.date DESC, l.parent_id, l.id`;
+    return this.stmt(sql).all(params).map(toTransactionLine);
+  }
+
+  /**
+   * The spending lines in range, bucketed. Entity buckets come most-spent first (the sums are
+   * negative, so ascending), months chronologically.
+   */
+  spendingBy(budgetId: string, groupBy: SpendingGroupBy, filter: SpendingFilter = {}): SpendingAggregate[] {
+    const { where, params } = spendingWhere(budgetId, filter);
+    const grouping = SPENDING_GROUPINGS[groupBy];
+    const sql = `
+      WITH lines AS (${LINES_CTE})
+      SELECT ${grouping.key} AS key, ${grouping.name} AS name, ${grouping.extra}
+             COUNT(*) AS count, SUM(l.amount) AS spent
+      ${SPENDING_FROM}
+      WHERE ${[SPENDING_RULE, ...where].join(" AND ")}
+      GROUP BY ${grouping.key}, ${grouping.name}
+      ORDER BY ${groupBy === "month" ? "key ASC" : "spent ASC, name ASC"}`;
     return this.stmt(sql)
       .all(params)
-      .map((r) => ({
-        id: r.id as string,
-        parentId: (r.parent_id as string | null) ?? null,
-        date: r.date as string,
-        amount: Number(r.amount),
-        accountId: r.account_id as string,
-        accountName: r.account_name as string,
-        payeeId: (r.payee_id as string | null) ?? null,
-        payeeName: (r.payee_name as string | null) ?? null,
-        categoryId: (r.category_id as string | null) ?? null,
-        categoryName: (r.category_name as string | null) ?? null,
-        categoryGroupName: (r.category_group_name as string | null) ?? null,
-        memo: (r.memo as string | null) ?? null,
-        cleared: r.cleared as ClearedStatus,
-        approved: Number(r.approved) === 1,
-        flagColor: (r.flag_color as string | null) ?? null,
-        transferAccountId: (r.transfer_account_id as string | null) ?? null,
-      }));
+      .map((r) => {
+        const row: SpendingAggregate = {
+          key: (r.key as string | null) ?? null,
+          name: r.name as string,
+          count: Number(r.count),
+          spent: Number(r.spent),
+        };
+        if (groupBy === "category") {
+          row.groupName = r.group_name as string;
+          row.hidden = Number(r.hidden) === 1;
+        }
+        return row;
+      });
+  }
+
+  /**
+   * The spending lines in range summed per month per category (or per category group), so a trend
+   * over several series is one pass over the lines rather than one per series. A line whose
+   * entity is missing — no category, a deleted one, a group that is gone — has no series to land
+   * in and is left out; the filter is what names the entities the caller wants.
+   */
+  spendingByMonth(budgetId: string, splitBy: "category" | "category_group", filter: SpendingFilter = {}): MonthlySpending[] {
+    const { where, params } = spendingWhere(budgetId, filter);
+    const key = splitBy === "category" ? "c.id" : "g.id";
+    const sql = `
+      WITH lines AS (${LINES_CTE})
+      SELECT ${key} AS key, SUBSTR(l.date, 1, 7) AS month, SUM(l.amount) AS spent
+      ${SPENDING_FROM}
+      WHERE ${[SPENDING_RULE, `${key} IS NOT NULL`, ...where].join(" AND ")}
+      GROUP BY ${key}, month
+      ORDER BY ${key}, month`;
+    return this.stmt(sql)
+      .all(params)
+      .map((r) => ({ key: r.key as string, month: r.month as string, spent: Number(r.spent) }));
+  }
+
+  /** The line count and milliunit sum of every spending line the filter selects. */
+  spendingTotal(budgetId: string, filter: SpendingFilter = {}): { count: number; spent: number } {
+    const { where, params } = spendingWhere(budgetId, filter);
+    const sql = `
+      WITH lines AS (${LINES_CTE})
+      SELECT COUNT(*) AS count, COALESCE(SUM(l.amount), 0) AS spent
+      ${SPENDING_FROM}
+      WHERE ${[SPENDING_RULE, ...where].join(" AND ")}`;
+    const r = this.stmt(sql).get(params)!;
+    return { count: Number(r.count), spent: Number(r.spent) };
+  }
+
+  /**
+   * Why the spending total is not the register total: the lines the same filter reached that the
+   * rule dropped. Each line falls in exactly one bucket, tracking first, so the three counts can be
+   * added up without double counting.
+   */
+  spendingExclusions(budgetId: string, filter: SpendingFilter = {}): SpendingExclusions {
+    const { where, params } = spendingWhere(budgetId, filter);
+    const sql = `
+      WITH lines AS (${LINES_CTE})
+      SELECT
+        SUM(CASE WHEN COALESCE(a.on_budget, 0) = 0 THEN 1 ELSE 0 END) AS tracking,
+        SUM(CASE WHEN COALESCE(a.on_budget, 0) = 1 AND COALESCE(c.internal, 0) = 1 THEN 1 ELSE 0 END) AS inflows,
+        SUM(CASE WHEN COALESCE(a.on_budget, 0) = 1 AND l.category_id IS NULL AND l.transfer_account_id IS NOT NULL
+                 THEN 1 ELSE 0 END) AS transfers
+      FROM lines l
+      LEFT JOIN accounts a   ON a.budget_id = $b AND a.id = l.account_id
+      LEFT JOIN categories c ON c.budget_id = $b AND c.id = l.category_id
+      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}`;
+    const r = this.stmt(sql).get(params)!;
+    return { transfers: Number(r.transfers ?? 0), tracking: Number(r.tracking ?? 0), inflows: Number(r.inflows ?? 0) };
+  }
+
+  /**
+   * The lines a search matches, newest first. Unlike the spending queries this applies no rule at
+   * all: tracking accounts, transfers between budget accounts and inflows are all reachable,
+   * because a drill-down is about finding a transaction, not about reconciling a report.
+   */
+  searchLines(budgetId: string, filter: SearchFilter = {}): TransactionLine[] {
+    const { where, params } = searchWhere(budgetId, filter);
+    // Bound, never interpolated: the SQL text keys the statement cache. -1 is SQLite's "no limit".
+    params.limit = filter.limit !== undefined && Number.isFinite(filter.limit) ? Math.max(0, Math.floor(filter.limit)) : -1;
+    const sql = `
+      WITH lines AS (${LINES_CTE})
+      SELECT l.*, COALESCE(a.name, '(unknown account)') AS account_name, p.name AS payee_name,
+             ${SEARCH_CATEGORY_NAME} AS category_name, ${SEARCH_GROUP_NAME} AS category_group_name
+      ${SEARCH_FROM}
+      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+      ORDER BY l.date DESC, l.parent_id, l.id
+      LIMIT $limit`;
+    return this.stmt(sql).all(params).map(toTransactionLine);
+  }
+
+  /**
+   * How many lines the search matched and what they add up to, signed as YNAB stores them. Counted
+   * separately from `searchLines` so a capped page still reports the whole picture.
+   */
+  searchTotal(budgetId: string, filter: SearchFilter = {}): { count: number; sum: number } {
+    const { where, params } = searchWhere(budgetId, filter);
+    const sql = `
+      WITH lines AS (${LINES_CTE})
+      SELECT COUNT(*) AS count, COALESCE(SUM(l.amount), 0) AS sum
+      ${SEARCH_FROM}
+      ${where.length ? `WHERE ${where.join(" AND ")}` : ""}`;
+    const r = this.stmt(sql).get(params)!;
+    return { count: Number(r.count), sum: Number(r.sum) };
+  }
+
+  /**
+   * Turn what a user said into ids. Each string is tried as an id first, then as a whole name,
+   * compared with `fold()` so case, accents, emoji and surrounding whitespace do not matter — never
+   * as a substring. A string that matches nothing, or more than one entity, throws
+   * `NameResolutionError` naming the input and every candidate.
+   */
+  resolveEntities(budgetId: string, input: EntityNames): ResolvedEntities {
+    const resolved: ResolvedEntities = {};
+    for (const kind of Object.keys(RESOLVABLE) as (keyof EntityNames)[]) {
+      const values = input[kind];
+      if (values === undefined) continue;
+      const table = RESOLVABLE[kind];
+      // The table name comes from RESOLVABLE, never from the caller.
+      const rows = this.stmt(`SELECT id, name FROM ${table.table} WHERE budget_id = ?`)
+        .all(budgetId)
+        .map((r) => ({ id: r.id as string, name: r.name as string }));
+      const index = indexEntities(rows);
+      resolved[table.key] = values.map((value) => resolveOne(value, index, table));
+    }
+    return resolved;
+  }
+
+  /**
+   * The display names of ids the caller already holds — the other direction from `resolveEntities`,
+   * for a report that filtered by id and must still label its rows with something a person reads.
+   * Unlike `categoryTree` this hides nothing: a hidden or internal entity has a name too, and an id
+   * with no row simply has no entry.
+   */
+  entityLabels(budgetId: string, kind: keyof EntityNames, ids: string[]): Map<string, string> {
+    if (ids.length === 0) return new Map();
+    const table = RESOLVABLE[kind];
+    // The table name comes from RESOLVABLE, never from the caller.
+    const rows = this.stmt(`SELECT id, name FROM ${table.table} WHERE budget_id = ?`).all(budgetId);
+    const names = new Map(rows.map((r) => [r.id as string, r.name as string]));
+    return new Map(ids.filter((id) => names.has(id)).map((id) => [id, names.get(id)!]));
   }
 
   month(budgetId: string, month: string): MonthRow | null {
@@ -723,6 +982,50 @@ export class BudgetDb {
     const byAccountName = byName<AccountRow>((a) => a.name);
     accounts.sort((a, b) => a.type.localeCompare(b.type) || byAccountName(a, b));
     return { accounts, closedOmitted: options.includeClosed ? 0 : closed };
+  }
+
+  /**
+   * The same per-month category figures across a window of months, one row per category per month
+   * it has a row in, ordered by category then month. Internal categories are left out, as in
+   * `monthDetail`, and a category whose row no longer resolves keeps its figures under
+   * `(deleted category)` rather than disappearing from a range the header still counts.
+   */
+  monthCategoryRange(budgetId: string, months: string[], filter: MonthCategoryFilter = {}): MonthCategoryRangeRow[] {
+    if (months.length === 0) return [];
+    const params: Record<string, SqlValue> = { b: budgetId };
+    const where: string[] = [];
+    // Months are stored as the first day of the month; the caller speaks in `YYYY-MM` keys.
+    inList(where, params, "mc.month", "months", months.map((month) => `${month}-01`));
+    inList(where, params, "mc.category_id", "cat", filter.categoryIds);
+    inList(where, params, "c.category_group_id", "grp", filter.groupIds);
+
+    return this.stmt(
+      `SELECT mc.month, mc.category_id, mc.budgeted, mc.activity, mc.balance,
+              COALESCE(c.name, '(deleted category)') AS name, COALESCE(c.hidden, 0) AS hidden,
+              ${GROUP_COLUMNS}
+       FROM month_categories mc
+       LEFT JOIN categories c ON c.budget_id = mc.budget_id AND c.id = mc.category_id
+       ${GROUP_JOIN}
+       WHERE mc.budget_id = $b AND COALESCE(c.internal, 0) = 0 AND ${where.join(" AND ")}
+       ORDER BY mc.category_id, mc.month`,
+    )
+      .all(params)
+      .map((r): MonthCategoryRangeRow => {
+        const groupName = r.group_name as string;
+        return {
+          month: (r.month as string).slice(0, 7),
+          categoryId: r.category_id as string,
+          name: r.name as string,
+          groupName,
+          hidden: isHidden(r),
+          // YNAB names this group itself and does not let anyone rename it, and the cache keeps no
+          // internal flag for groups, so the name is what tells a payment apart from spending.
+          creditCardPayment: groupName === CREDIT_CARD_PAYMENTS,
+          budgeted: Number(r.budgeted),
+          activity: Number(r.activity),
+          balance: Number(r.balance),
+        };
+      });
   }
 
   /**
@@ -967,6 +1270,214 @@ function toMonthCategoryRow(r: Record<string, unknown>): MonthCategoryRow {
     goalUnderFunded: r.goal_under_funded === null ? null : Number(r.goal_under_funded),
   };
 }
+
+/**
+ * The flattening every line query starts from: one row per plain transaction, plus one row per
+ * subtransaction inheriting its parent's date, account, cleared, approved, flag and — where the
+ * split leaves them blank — payee and memo. `$b` is the budget id.
+ */
+const LINES_CTE = `
+        SELECT t.id, NULL AS parent_id, t.date, t.amount, t.account_id, t.payee_id, t.category_id,
+               t.memo, t.transfer_account_id, t.cleared, t.approved, t.flag_color
+        FROM transactions t
+        WHERE t.budget_id = $b
+          AND NOT EXISTS (SELECT 1 FROM subtransactions s WHERE s.budget_id = t.budget_id AND s.transaction_id = t.id)
+        UNION ALL
+        SELECT s.id, t.id, t.date, s.amount, t.account_id, COALESCE(s.payee_id, t.payee_id), s.category_id,
+               COALESCE(s.memo, t.memo), s.transfer_account_id, t.cleared, t.approved, t.flag_color
+        FROM subtransactions s
+        JOIN transactions t ON t.budget_id = s.budget_id AND t.id = s.transaction_id
+        WHERE s.budget_id = $b`;
+
+/** The joins every spending query shares; the inner account join is what drops tracking accounts. */
+const SPENDING_FROM = `
+      FROM lines l
+      JOIN accounts a             ON a.budget_id = $b AND a.id = l.account_id AND a.on_budget = 1
+      LEFT JOIN categories c      ON c.budget_id = $b AND c.id = l.category_id
+      LEFT JOIN category_groups g ON g.budget_id = $b AND g.id = c.category_group_id
+      LEFT JOIN payees p          ON p.budget_id = $b AND p.id = l.payee_id`;
+
+/**
+ * The rule itself, in one place: a real non-internal category, or no category and no transfer, or
+ * a category id that no longer resolves (the line is still spending, and still has to reconcile).
+ */
+const SPENDING_RULE = `((c.id IS NOT NULL AND c.internal = 0)
+        OR (l.category_id IS NULL AND l.transfer_account_id IS NULL)
+        OR (l.category_id IS NOT NULL AND c.id IS NULL))`;
+
+/**
+ * A spending line always has a category name to show. Note the budget's own internal `Uncategorized`
+ * category is not this bucket — a line carrying it is an inflow-style internal line and never gets
+ * here; this is for `category_id IS NULL`.
+ */
+const CATEGORY_NAME = `CASE WHEN l.category_id IS NULL THEN 'Uncategorized' ELSE COALESCE(c.name, '(deleted category)') END`;
+const CATEGORY_GROUP_NAME = `CASE WHEN l.category_id IS NULL THEN 'Uncategorized'
+                  ELSE COALESCE(g.name, c.category_group_name, '(unknown group)') END`;
+
+/** The key, label and extra columns each `spendingBy` grouping selects. */
+const SPENDING_GROUPINGS: Record<SpendingGroupBy, { key: string; name: string; extra: string }> = {
+  category: {
+    key: "c.id",
+    name: CATEGORY_NAME,
+    extra: `${CATEGORY_GROUP_NAME} AS group_name, MAX(CASE WHEN c.hidden = 1 OR g.hidden = 1 THEN 1 ELSE 0 END) AS hidden,`,
+  },
+  category_group: { key: "g.id", name: CATEGORY_GROUP_NAME, extra: "" },
+  payee: { key: "p.id", name: "COALESCE(p.name, '(no payee)')", extra: "" },
+  account: { key: "a.id", name: "a.name", extra: "" },
+  month: { key: "SUBSTR(l.date, 1, 7)", name: "SUBSTR(l.date, 1, 7)", extra: "" },
+};
+
+/**
+ * The filter clauses shared by every spending query. Only placeholder names are interpolated — the
+ * values are bound, so there are at most a few dozen distinct SQL texts to key the statement cache.
+ */
+function spendingWhere(budgetId: string, filter: SpendingFilter): { where: string[]; params: Record<string, SqlValue> } {
+  const params: Record<string, SqlValue> = { b: budgetId };
+  const where: string[] = [];
+  if (filter.from !== undefined) {
+    where.push("l.date >= $from");
+    params.from = filter.from;
+  }
+  if (filter.to !== undefined) {
+    where.push("l.date <= $to");
+    params.to = filter.to;
+  }
+  inList(where, params, "l.category_id", "cat", filter.categoryIds);
+  inList(where, params, "c.category_group_id", "grp", filter.groupIds);
+  inList(where, params, "l.payee_id", "pay", filter.payeeIds);
+  inList(where, params, "l.account_id", "acc", filter.accountIds);
+  return { where, params };
+}
+
+/**
+ * `column IN (...)` over a caller's list of ids. The list is bound as one JSON array and unpacked
+ * by SQLite, so the SQL text is the same however many ids there are — a statement per list length
+ * would grow the statement cache without bound. An absent or empty list constrains nothing; the
+ * values inside one list are ORed. Only the placeholder name is interpolated.
+ */
+function inList(where: string[], params: Record<string, SqlValue>, column: string, name: string, values: string[] | undefined): void {
+  if (!values || values.length === 0) return;
+  params[name] = JSON.stringify(values);
+  where.push(`${column} IN (SELECT value FROM json_each($${name}))`);
+}
+
+/** Search joins everything outer: a line on a tracking account or with no payee is still a match. */
+const SEARCH_FROM = `
+      FROM lines l
+      LEFT JOIN accounts a        ON a.budget_id = $b AND a.id = l.account_id
+      LEFT JOIN categories c      ON c.budget_id = $b AND c.id = l.category_id
+      LEFT JOIN category_groups g ON g.budget_id = $b AND g.id = c.category_group_id
+      LEFT JOIN payees p          ON p.budget_id = $b AND p.id = l.payee_id`;
+
+/**
+ * A searched line names its category only when it carries one: an uncategorized line and a
+ * transfer have nothing to name, and a row saying `Uncategorized` would be a claim about the
+ * budget rather than about the line. A category id that no longer resolves is still named.
+ */
+const SEARCH_CATEGORY_NAME = `CASE WHEN l.category_id IS NULL THEN NULL ELSE COALESCE(c.name, '(deleted category)') END`;
+const SEARCH_GROUP_NAME = `CASE WHEN l.category_id IS NULL THEN NULL ELSE COALESCE(g.name, c.category_group_name) END`;
+
+/**
+ * The spending filter's clauses plus the search-only ones. The amount bounds are on `ABS(amount)`
+ * and inclusive, so a range reads the same whichever way the money went, and `direction` picks the
+ * side. `text` is matched with `LIKE` on lower-cased memo and payee name: SQLite's `LOWER` folds
+ * ASCII only, which is enough for the substring search a drill-down needs (the resolver, which has
+ * to be exact, folds in JS instead). `%` and `_` in the input are escaped so they match themselves.
+ */
+function searchWhere(budgetId: string, filter: SearchFilter): { where: string[]; params: Record<string, SqlValue> } {
+  const { where, params } = spendingWhere(budgetId, filter);
+  if (filter.minAmount !== undefined) {
+    where.push("ABS(l.amount) >= $minAmount");
+    params.minAmount = filter.minAmount;
+  }
+  if (filter.maxAmount !== undefined) {
+    where.push("ABS(l.amount) <= $maxAmount");
+    params.maxAmount = filter.maxAmount;
+  }
+  if (filter.direction !== undefined) where.push(filter.direction === "inflow" ? "l.amount > 0" : "l.amount < 0");
+  if (filter.text !== undefined && filter.text.trim() !== "") {
+    where.push(`(LOWER(COALESCE(l.memo, '')) LIKE $text ESCAPE '\\' OR LOWER(COALESCE(p.name, '')) LIKE $text ESCAPE '\\')`);
+    params.text = `%${filter.text.trim().toLowerCase().replace(/[\\%_]/g, "\\$&")}%`;
+  }
+  return { where, params };
+}
+
+interface ResolvableKind {
+  table: string;
+  key: keyof ResolvedEntities;
+  singular: string;
+  plural: string;
+}
+
+/** The four kinds a name can be resolved against; the table names come from here, never from input. */
+const RESOLVABLE: Record<keyof EntityNames, ResolvableKind> = {
+  categories: { table: "categories", key: "categoryIds", singular: "category", plural: "categories" },
+  groups: { table: "category_groups", key: "groupIds", singular: "category group", plural: "category groups" },
+  payees: { table: "payees", key: "payeeIds", singular: "payee", plural: "payees" },
+  accounts: { table: "accounts", key: "accountIds", singular: "account", plural: "accounts" },
+};
+
+interface EntityRow {
+  id: string;
+  name: string;
+}
+
+/** One kind's rows, folded once: an id set and every row under its comparable name. */
+interface EntityIndex {
+  ids: Set<string>;
+  byName: Map<string, EntityRow[]>;
+}
+
+/** Folding is the expensive part of a name match, so it happens once per row, not once per input. */
+function indexEntities(rows: EntityRow[]): EntityIndex {
+  const byName = new Map<string, EntityRow[]>();
+  for (const row of rows) {
+    const folded = fold(row.name);
+    const bucket = byName.get(folded);
+    if (bucket) bucket.push(row);
+    else byName.set(folded, [row]);
+  }
+  return { ids: new Set(rows.map((row) => row.id)), byName };
+}
+
+function resolveOne(value: string, index: EntityIndex, kind: ResolvableKind): string {
+  const wanted = value.trim();
+  if (index.ids.has(wanted)) return wanted;
+  const folded = fold(wanted);
+  const matches = folded === "" ? [] : (index.byName.get(folded) ?? []);
+  if (matches.length === 1) return matches[0].id;
+  if (matches.length === 0) throw new NameResolutionError(`No ${kind.singular} named "${wanted}".`);
+  // Every match folds to the same name, so the id is the only thing left to order by.
+  const candidates = [...matches]
+    .sort((a, b) => a.id.localeCompare(b.id))
+    .map((m) => `${m.name} (${m.id})`)
+    .join(", ");
+  throw new NameResolutionError(`"${wanted}" matches several ${kind.plural}: ${candidates}. Use the id.`);
+}
+
+function toTransactionLine(r: Record<string, unknown>): TransactionLine {
+  return {
+    id: r.id as string,
+    parentId: (r.parent_id as string | null) ?? null,
+    date: r.date as string,
+    amount: Number(r.amount),
+    accountId: r.account_id as string,
+    accountName: r.account_name as string,
+    payeeId: (r.payee_id as string | null) ?? null,
+    payeeName: (r.payee_name as string | null) ?? null,
+    categoryId: (r.category_id as string | null) ?? null,
+    categoryName: (r.category_name as string | null) ?? null,
+    categoryGroupName: (r.category_group_name as string | null) ?? null,
+    memo: (r.memo as string | null) ?? null,
+    cleared: r.cleared as ClearedStatus,
+    approved: Number(r.approved) === 1,
+    flagColor: (r.flag_color as string | null) ?? null,
+    transferAccountId: (r.transfer_account_id as string | null) ?? null,
+  };
+}
+
+/** The group YNAB creates for credit card payments, under a name it does not let anyone change. */
+const CREDIT_CARD_PAYMENTS = "Credit Card Payments";
 
 /**
  * How a category resolves its group, stated once: `categoryTree` and `monthDetail` must agree
