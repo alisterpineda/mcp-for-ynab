@@ -4,6 +4,7 @@ import { registerBudgetVsActual } from "./budget-vs-actual.js";
 import { registerGetMonth } from "./get-month.js";
 import { registerListAccounts } from "./list-accounts.js";
 import { registerListCategories } from "./list-categories.js";
+import { registerListScheduled } from "./list-scheduled.js";
 import { registerSearchTransactions } from "./search-transactions.js";
 import { registerSpendingBreakdown } from "./spending-breakdown.js";
 import { registerSpendingTrend } from "./spending-trend.js";
@@ -17,6 +18,7 @@ export function registerTools(server: McpServer, store: BudgetStore): void {
   registerSpendingBreakdown(server, store);
   registerSpendingTrend(server, store);
   registerSearchTransactions(server, store);
+  registerListScheduled(server, store);
   registerBudgetVsActual(server, store);
   registerSyncStatus(server, store);
 }

@@ -168,6 +168,13 @@ describe("budget_vs_actual and the end of the window", () => {
 });
 
 describe("budget_vs_actual filters", () => {
+  it("echoes what the filters resolved to", async () => {
+    await using h = await harness({ budget: spendingBudget() });
+    const body = await h.json("budget_vs_actual", { start: "2026-07", end: "2026-09", categories: ["groc"] });
+    assert.deepEqual(body.filters, { categories: [{ id: "c1", name: "Groceries" }] });
+    assert.equal((body.rows as { name: string }[]).length, 1);
+  });
+
   it("takes categories and groups by id or by exact name", async () => {
     await using h = await spending();
     const byName = await h.json("budget_vs_actual", { ...PAST, categories: ["groceries", "Dining Out"] });

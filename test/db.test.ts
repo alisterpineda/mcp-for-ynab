@@ -12,6 +12,7 @@ import {
   fullBudget,
   month,
   orientationBudget,
+  scheduledBudget,
   spendingBudget,
   subtransaction,
   transaction,
@@ -837,6 +838,58 @@ describe("the spending rule against YNAB's own month figures", () => {
   });
 });
 
+describe("BudgetDb.scheduledRows", () => {
+  it("stores what the tool reports as real columns, joined to names, soonest first", () => {
+    const db = new BudgetDb(":memory:");
+    db.applyBudget(BUDGET_ID, scheduledBudget(), 10, NOW);
+    const rows = db.scheduledRows(BUDGET_ID);
+    assert.deepEqual(
+      rows.map((r) => r.id),
+      ["sch-groceries", "sch-mortgage", "sch-pay", "sch-card", "sch-interest", "sch-once", "sch-insurance"],
+    );
+    const mortgage = rows.find((r) => r.id === "sch-mortgage")!;
+    assert.deepEqual(mortgage, {
+      id: "sch-mortgage",
+      dateFirst: "2026-10-01",
+      dateNext: "2026-10-01",
+      frequency: "monthly",
+      amount: -150_000,
+      accountId: "a1",
+      accountName: "Chequing",
+      accountOnBudget: true,
+      payeeName: "Transfer : Mortgage",
+      categoryName: "Mortgage",
+      categoryGroupName: "Housing",
+      transferAccountId: "a3",
+      transferAccountName: "Mortgage",
+      transferAccountOnBudget: false,
+      memo: null,
+      flagColor: null,
+      lines: [],
+    });
+    const interest = rows.find((r) => r.id === "sch-interest")!;
+    assert.equal(interest.accountOnBudget, false);
+    assert.equal(interest.payeeName, null);
+    assert.equal(interest.transferAccountOnBudget, null);
+    db.close();
+  });
+
+  it("attaches a split's lines to their parent", () => {
+    const db = new BudgetDb(":memory:");
+    db.applyBudget(BUDGET_ID, scheduledBudget(), 10, NOW);
+    const insurance = db.scheduledRows(BUDGET_ID).find((r) => r.id === "sch-insurance")!;
+    assert.equal(insurance.categoryName, null);
+    assert.deepEqual(
+      insurance.lines.map((l) => [l.id, l.amount, l.categoryName, l.memo]),
+      [
+        ["ss1", -100_000, "Household", "home"],
+        ["ss2", -20_000, "Dining Out", null],
+      ],
+    );
+    db.close();
+  });
+});
+
 describe("BudgetDb.resolveEntities", () => {
   const db = spending();
 
@@ -854,8 +907,29 @@ describe("BudgetDb.resolveEntities", () => {
     assert.deepEqual(db.resolveEntities(BUDGET_ID, { groups: ["EVERYDAY"] }), { groupIds: ["g1"] });
   });
 
-  it("does not match a substring", () => {
-    assert.throws(() => db.resolveEntities(BUDGET_ID, { categories: ["Groc"] }), NameResolutionError);
+  it("falls back to a part of a name when exactly one entity contains it", () => {
+    assert.deepEqual(db.resolveEntities(BUDGET_ID, { categories: ["Groc"] }), { categoryIds: ["c1"] });
+    assert.deepEqual(db.resolveEntities(BUDGET_ID, { payees: ["luna"] }), { payeeIds: ["p2"] });
+    assert.deepEqual(db.resolveEntities(BUDGET_ID, { accounts: ["broker"] }), { accountIds: ["a4"] });
+  });
+
+  it("prefers a whole name over the names that merely contain it", () => {
+    // "Corner" is a part of Corner Diner and both Corner Stores, but "Corner Diner" is exactly one name.
+    assert.deepEqual(db.resolveEntities(BUDGET_ID, { payees: ["corner diner"] }), { payeeIds: ["p3"] });
+  });
+
+  it("asks back when a part of a name is in more than one entity, naming them", () => {
+    assert.throws(
+      () => db.resolveEntities(BUDGET_ID, { payees: ["Corner"] }),
+      (error: Error) =>
+        error instanceof NameResolutionError &&
+        error.message ===
+          'No payee named "Corner"; 3 payees contain it: Corner Diner (p3), corner store (p10), Corner Store (p6). Use the whole name or the id.',
+    );
+  });
+
+  it("never matches a name that folds away to nothing", () => {
+    assert.throws(() => db.resolveEntities(BUDGET_ID, { payees: ["  "] }), (error: Error) => error.message === 'No payee named "".');
   });
 
   it("resolves a transfer payee like any other payee", () => {

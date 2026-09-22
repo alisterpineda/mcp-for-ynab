@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { BudgetDb, type SyncedBudget } from "../../src/cache/db.js";
 import { BudgetStore } from "../../src/cache/store.js";
+import { FREQUENCIES } from "../../src/tools/list-scheduled.js";
 import { YnabApiError, YnabClient } from "../../src/ynab/client.js";
 
 const token = process.env.YNAB_ACCESS_TOKEN;
@@ -141,6 +142,20 @@ function assertSpending(db: BudgetDb, budget: SyncedBudget): void {
     const excluded = db.spendingExclusions(budget.id, range);
     const all = db.searchTotal(budget.id, range).count;
     assert.equal(total.count + excluded.transfers + excluded.tracking + excluded.inflows, all, `${month}: every line lands in one bucket`);
+
+    // The lines the search calls uncategorized are the ones YNAB posts to its own internal
+    // Uncategorized category, so their sum is that category's activity for the month.
+    const uncategorized = db.searchTotal(budget.id, { ...range, uncategorized: true });
+    const [uncategorizedId] = db.resolveEntities(budget.id, { categories: ["Uncategorized"] }).categoryIds!;
+    const reported = db.monthCategories(budget.id, `${month}-01`).find((row) => row.categoryId === uncategorizedId)?.activity ?? 0;
+    assert.equal(uncategorized.sum, reported, `${month}: uncategorized lines vs YNAB's Uncategorized activity`);
+  }
+
+  // Every scheduled transaction lands on a cached account with a frequency the tool can rate.
+  for (const row of db.scheduledRows(budget.id)) {
+    assert.notEqual(row.accountName, "(unknown account)", `scheduled ${row.id} has its account cached`);
+    assert.match(row.dateNext, /^\d{4}-\d{2}-\d{2}$/);
+    assert.ok(row.frequency in FREQUENCIES, `scheduled ${row.id} carries a frequency the tool knows: ${row.frequency}`);
   }
 
   // Every real name resolves back to its own id, so the tools' name filters reach every entity.

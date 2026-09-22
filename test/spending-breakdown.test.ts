@@ -195,6 +195,15 @@ describe("spending_breakdown", () => {
     );
   });
 
+  it("echoes what each filter resolved to, so a partial name is visible next to the numbers", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", { start: "2026-08", end: "2026-08", payees: ["costco"], groups: ["every"] });
+    assert.deepEqual(body.filters, { groups: [{ id: "g1", name: "Everyday" }], payees: [{ id: "p1", name: "Costco" }] });
+    assert.equal(body.total, 90);
+    const plain = await h.json("spending_breakdown", { start: "2026-08", end: "2026-08" });
+    assert.ok(!("filters" in plain));
+  });
+
   it("reports an unknown name as a tool error rather than an empty answer", async () => {
     await using h = await spending();
     const { text, isError } = await h.call("spending_breakdown", { categories: ["Grocery"] });

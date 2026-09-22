@@ -65,10 +65,12 @@ its rows by amount spent, `search_transactions` returns its rows newest first, a
   line `count` and its `share` of the total; rows past the cap (25, or `limit`) are summed into
   `other`, and a month grouping is zero-filled and never capped. `start` and `end` take
   `YYYY-MM-DD` or `YYYY-MM` and default to the current month to date. The `categories`, `groups`,
-  `payees` and `accounts` filters take ids or exact names. The response states its `scope` — the
-  spending rule it applied — and counts what that rule dropped under `excluded`.
+  `payees` and `accounts` filters take ids or names — a whole name first, else a part that only one
+  entity contains — and the response echoes what each resolved to under `filters`. The response
+  states its `scope` — the spending rule it applied — and counts what that rule dropped under
+  `excluded`.
 - `spending_trend` — whether it is creeping up: a month-by-month series of spending for the
-  `categories` and `groups` you name (ids or exact names), one series each in the order asked,
+  `categories` and `groups` you name (ids or names, whole or a unique part), one series each in the order asked,
   a group series summing its categories. The window is the last six months ending at the current
   one; `months` changes how many and `start`/`end` as `YYYY-MM` win over it. Months with no
   activity read as zero, and each series carries `average`, `min` and `max` over the complete
@@ -78,7 +80,18 @@ its rows by amount spent, `search_transactions` returns its rows newest first, a
   units), `direction` and `text` (part of a memo or payee name). No spending rule applies, so
   tracking accounts, transfers and income are all reachable; a split comes back as one row per
   line with its `parent_id`. Rows keep YNAB's sign, come newest first and stop at `limit` (50 by
-  default, 200 at most), while `count` and `sum` always cover every match.
+  default, 200 at most), while `count` and `sum` always cover every match. It is also where the
+  register's chores are: `uncategorized: true` finds the lines YNAB wants categorized (on-budget,
+  no category, not a transfer to another on-budget account), `approved: false` the imports waiting
+  for approval, and `cleared` picks a cleared state. When `uncategorized` is given (either way)
+  or `approved` is false and no `start` is, the search covers the whole history rather than the
+  current month.
+- `list_scheduled` — what is coming up: every scheduled transaction, soonest first, with its
+  frequency in words, `date_next`, amount with YNAB's sign, payee, category, account, the account a
+  transfer goes to, and a split's `lines`. A recurring row carries `per_month` (the amount times the
+  frequency's occurrences a year, divided by twelve), and the response totals the recurring
+  `outflow_per_month` and `inflow_per_month` on on-budget accounts, leaving out transfers to another
+  on-budget account. No parameters besides `refresh`; the list is short enough to return whole.
 - `budget_vs_actual` — where the plan and the spending disagree: one row per category over a
   window of months with `assigned` and `activity` summed, `available` at the end of the last
   month, and counts of the months that ended in the red (`overspent_months`) and the months where
@@ -88,7 +101,7 @@ its rows by amount spent, `search_transactions` returns its rows newest first, a
   Categories that are zero throughout are counted in `categories_omitted`; hidden and credit card
   payment categories are kept and marked. `include_months` adds the per-month figures, and the
   current month is flagged `partial_month` and left out of both counts unless `include_partial`
-  is set. `categories` and `groups` take ids or exact names.
+  is set. `categories` and `groups` take ids or names, whole or a unique part.
 - `sync_status` — budget name, last sync time, transaction count, date range, and sync health.
   `refresh: true` forces a delta sync; `full_resync: true` discards the cache and re-downloads everything.
 
@@ -101,7 +114,7 @@ The live test in `test/integration/` runs only when `YNAB_ACCESS_TOKEN` is set. 
 uses an in-memory database, and costs four API requests (budget list, full sync, delta sync, and
 an invalid-token check). On that sync it also proves the spending rule against the real budget:
 for every cached month and category, the spending lines add up to the `activity` YNAB reports,
-every line lands in exactly one of spending, transfer, tracking or inflow, and every real name
-resolves back to its own id. Copy `.env.example` to `.env`
+every line lands in exactly one of spending, transfer, tracking or inflow, the uncategorized lines
+add up to YNAB's own Uncategorized activity, and every real name resolves back to its own id. Copy `.env.example` to `.env`
 and fill in your token; `npm test` loads it automatically. `.env` is git-ignored. Set
 `YNAB_BUDGET_ID` as well to test a budget other than your default one.

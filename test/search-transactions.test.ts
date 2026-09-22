@@ -169,6 +169,90 @@ describe("search_transactions", () => {
     assert.deepEqual(idsOf(anded), ["s1", "s3", "t20", "t40"].sort());
   });
 
+  it("accepts a part of a name and echoes what it landed on next to the numbers", async () => {
+    await using h = await spending();
+    const body = await h.json("search_transactions", { start: "2026-07", end: "2026-09", payees: ["luna"], accounts: ["a1"] });
+    assert.deepEqual(body.filters, { payees: [{ id: "p2", name: "Café Luna" }], accounts: [{ id: "a1", name: "Chequing" }] });
+    assert.deepEqual(idsOf(body), ["t11", "t22"]);
+  });
+
+  it("carries no `filters` key when nothing was filtered on", async () => {
+    await using h = await spending();
+    const body = await h.json("search_transactions", { start: "2026-09", end: "2026-09", categories: [] });
+    assert.ok(!("filters" in body));
+  });
+
+  it("finds the lines YNAB wants categorized, and only those", async () => {
+    // Beside the fixture's t6 (cash, no category): a transfer to a tracking account left without a
+    // category, which YNAB flags, and a tracking-account line with none, which it never does.
+    await using h = await harness({
+      budget: spendingBudget({
+        transactions: [
+          ...spendingBudget().transactions!,
+          transaction("u1", "2026-08-30", -25_000, { payee_id: "pt4", category_id: null, transfer_account_id: "a4" }),
+          transaction("u2", "2026-08-30", 25_000, { account_id: "a4", payee_id: "pt1", category_id: null, transfer_account_id: "a1" }),
+        ],
+      }),
+    });
+    const body = await h.json("search_transactions", { start: "2026-07", end: "2026-09", uncategorized: true });
+    assert.deepEqual(idsOf(body), ["t6", "u1"], "not the budget-to-budget transfers, not the tracking lines, not the split's lines");
+    assert.equal(body.sum, -50);
+
+    const categorized = await h.json("search_transactions", { start: "2026-08-30", end: "2026-08-30", uncategorized: false });
+    assert.deepEqual(idsOf(categorized), []);
+  });
+
+  it("finds the lines that carry a category with uncategorized: false, and only those", async () => {
+    await using h = await spending();
+    const range = { start: "2026-07", end: "2026-09", limit: 200 };
+    const all = await h.json("search_transactions", range);
+    const rest = await h.json("search_transactions", { ...range, uncategorized: false });
+    const categorized = rowsOf(all).filter((r) => "category" in r);
+    assert.ok(categorized.length > 0 && categorized.length < rowsOf(all).length, "the fixture has lines on both sides");
+    assert.deepEqual(idsOf(rest), categorized.map((r) => r.id).sort());
+    assert.ok(!idsOf(rest).includes("t6"), "the cash line with no category is not here");
+  });
+
+  it("widens to the whole history for uncategorized: false too, and answers an end before the history with zero", async () => {
+    await using h = await spending();
+    const rest = await h.json("search_transactions", { uncategorized: false });
+    assert.equal(rest.start, "2026-07-01", "from the earliest cached line");
+    assert.ok(Number(rest.count) > 0);
+    // Nothing is cached before July, so an end in June is answered rather than refused for a start
+    // the caller never gave.
+    const before = await h.json("search_transactions", { uncategorized: true, end: "2026-06" });
+    assert.equal(before.count, 0);
+    assert.equal(before.start, "2026-06-30");
+    assert.equal(before.end, "2026-06-30");
+  });
+
+  it("finds what is waiting for approval and filters on the cleared state", async () => {
+    await using h = await spending();
+    const waiting = await h.json("search_transactions", { start: "2026-07", end: "2026-09", approved: false });
+    assert.deepEqual(idsOf(waiting), ["t44"]);
+    const uncleared = await h.json("search_transactions", { start: "2026-07", end: "2026-09", cleared: "uncleared" });
+    assert.deepEqual(idsOf(uncleared), ["t44"]);
+    const reconciled = await h.json("search_transactions", { start: "2026-07", end: "2026-09", cleared: "reconciled" });
+    assert.equal(reconciled.count, 0);
+  });
+
+  it("covers the whole history for a chore when no start is given, and says so", async () => {
+    await using h = await spending();
+    // The fixture's lines all predate the current month, which the plain default would cover.
+    for (const args of [{ uncategorized: true }, { approved: false }]) {
+      const body = await h.json("search_transactions", args);
+      assert.equal(body.start, "2026-07-01", `${JSON.stringify(args)}: from the earliest cached line`);
+      assert.equal(body.count, 1);
+    }
+    const explicit = await h.json("search_transactions", { uncategorized: true, start: "2026-09" });
+    assert.equal(explicit.start, "2026-09-01", "an explicit start still wins");
+    assert.equal(explicit.count, 0);
+    // Asking for the approved lines is not a chore, so the plain default applies.
+    const approved = await h.json("search_transactions", { approved: true });
+    assert.equal(String(approved.start).slice(-2), "01");
+    assert.notEqual(approved.start, "2026-07-01");
+  });
+
   it("reports an unknown or ambiguous name as a tool error listing what it could mean", async () => {
     await using h = await spending();
     const unknown = await h.call("search_transactions", { accounts: ["Chequeing"] });

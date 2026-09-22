@@ -77,6 +77,10 @@
       "description": "Individual transaction lines filtered by date, category, payee, account, amount, direction or memo text, with the exact count and sum of every match."
     },
     {
+      "name": "list_scheduled",
+      "description": "Every scheduled transaction soonest first, with its frequency, what it costs a month, and the recurring outflow and inflow per month."
+    },
+    {
       "name": "budget_vs_actual",
       "description": "Assigned against activity per category over a window of months, with available, overspent-month and over-assigned-month counts, from YNAB's own per-month figures."
     },

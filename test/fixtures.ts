@@ -1,4 +1,15 @@
-import type { Account, Category, CategoryGroup, Month, Payee, BudgetDetail, SubTransaction, Transaction } from "../src/ynab/types.js";
+import type {
+  Account,
+  BudgetDetail,
+  Category,
+  CategoryGroup,
+  Month,
+  Payee,
+  ScheduledSubTransaction,
+  ScheduledTransaction,
+  SubTransaction,
+  Transaction,
+} from "../src/ynab/types.js";
 import type { BudgetSource, RateLimit } from "../src/ynab/client.js";
 
 export const BUDGET_ID = "budget-1";
@@ -84,6 +95,62 @@ export function transaction(id: string, date: string, amount: number, overrides:
 
 export function subtransaction(id: string, transactionId: string, amount: number, overrides: Partial<SubTransaction> = {}): SubTransaction {
   return { id, transaction_id: transactionId, amount, deleted: false, ...overrides };
+}
+
+export function scheduledTransaction(
+  id: string,
+  dateNext: string,
+  amount: number,
+  overrides: Partial<ScheduledTransaction> = {},
+): ScheduledTransaction {
+  return {
+    id,
+    date_first: dateNext,
+    date_next: dateNext,
+    frequency: "monthly",
+    amount,
+    account_id: "a1",
+    payee_id: "p1",
+    category_id: "c1",
+    deleted: false,
+    ...overrides,
+  };
+}
+
+export function scheduledSubtransaction(
+  id: string,
+  scheduledTransactionId: string,
+  amount: number,
+  overrides: Partial<ScheduledSubTransaction> = {},
+): ScheduledSubTransaction {
+  return { id, scheduled_transaction_id: scheduledTransactionId, amount, deleted: false, ...overrides };
+}
+
+/**
+ * The spending budget with a schedule on top: a monthly mortgage transfer to tracking (spending),
+ * a credit card payment between budget accounts (not spending), a weekly grocery run, a yearly
+ * insurance split across two categories, a twice-monthly paycheque, a one-off, and interest posted
+ * on the tracking mortgage itself. Per month by hand (milliunits): mortgage 150,000; groceries
+ * 80,000 × 52 / 12 = 346,666.67; insurance 120,000 / 12 = 10,000; card payment 60,000 (left out
+ * of the totals); paycheque 500,000 × 24 / 12 = 1,000,000; interest 400,000 (tracking, left out).
+ * So outflow_per_month = 506,666.67 and inflow_per_month = 1,000,000.
+ */
+export function scheduledBudget(): BudgetDetail {
+  return spendingBudget({
+    scheduled_transactions: [
+      scheduledTransaction("sch-mortgage", "2026-10-01", -150_000, { payee_id: "pt3", category_id: "c4", transfer_account_id: "a3" }),
+      scheduledTransaction("sch-card", "2026-10-05", -60_000, { payee_id: "pt2", category_id: null, transfer_account_id: "a2" }),
+      scheduledTransaction("sch-groceries", "2026-09-26", -80_000, { frequency: "weekly", memo: "weekly shop", flag_color: "blue" }),
+      scheduledTransaction("sch-insurance", "2027-01-15", -120_000, { frequency: "yearly", payee_id: "p9", category_id: null }),
+      scheduledTransaction("sch-pay", "2026-10-01", 500_000, { frequency: "twiceAMonth", payee_id: "p4", category_id: "c6" }),
+      scheduledTransaction("sch-once", "2026-11-30", -25_000, { frequency: "never", payee_id: "p7", category_id: "c8" }),
+      scheduledTransaction("sch-interest", "2026-10-31", -400_000, { account_id: "a3", payee_id: null, category_id: null, memo: "interest" }),
+    ],
+    scheduled_subtransactions: [
+      scheduledSubtransaction("ss1", "sch-insurance", -100_000, { category_id: "c2", memo: "home" }),
+      scheduledSubtransaction("ss2", "sch-insurance", -20_000, { category_id: "c3" }),
+    ],
+  });
 }
 
 /** A small but complete budget: two accounts, two categories, one split transaction. */

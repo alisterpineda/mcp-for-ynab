@@ -8,7 +8,7 @@ import { resolveFilters } from "./filters.js";
 
 const description = `Is it creeping up? A month-by-month series of spending for the categories or category groups you name, with the average, the lowest month and the highest. This is the tool for "how has dining out gone over the last six months?" and "are we spending more on groceries than we used to?".
 
-Ask for at least one \`categories\` or \`groups\` entry, by id or exact name — an ambiguous name comes back as an error listing the candidates. Each one becomes its own series in the order you asked, a group series being the sum of every category in it. The window is the last six months ending at the current month; \`months\` changes how many, and \`start\` and \`end\` as \`YYYY-MM\` win over it. The window cannot run past the current month, since a month that has not started has no spending to trend. Every month of the window is present in chronological order, and a month with no activity reads \`spent: 0\` rather than going missing.
+Ask for at least one \`categories\` or \`groups\` entry, by id or name — a whole name first, else a part that only one entity contains — and an ambiguous name comes back as an error listing the candidates. Each one becomes its own series in the order you asked, named by \`id\` and \`name\` so a partial name shows what it landed on, a group series being the sum of every category in it. The window is the last six months ending at the current month; \`months\` changes how many, and \`start\` and \`end\` as \`YYYY-MM\` win over it. The window cannot run past the current month, since a month that has not started has no spending to trend. Every month of the window is present in chronological order, and a month with no activity reads \`spent: 0\` rather than going missing.
 
 \`spent\` is positive for spending and negative for a month that netted a refund. The same rule as \`spending_breakdown\` decides what counts: lines on on-budget accounts with a non-internal category, so a categorized transfer to a tracking account counts, transfers between budget accounts and income do not, and each line of a split lands in its own category. The current month is still being lived in, so it is flagged \`partial\` and left out of \`average\`, \`min\` and \`max\`; \`include_partial: true\` counts it, and when the window holds no complete month those three keys are absent rather than guessed.
 
@@ -21,8 +21,8 @@ export function registerSpendingTrend(server: McpServer, store: BudgetStore): vo
       title: "Trend YNAB spending by month",
       description,
       inputSchema: {
-        categories: z.array(z.string()).optional().describe("Categories to trend, one series each, by id or exact name."),
-        groups: z.array(z.string()).optional().describe("Category groups to trend, one series each summing the group's categories, by id or exact name."),
+        categories: z.array(z.string()).optional().describe("Categories to trend, one series each, by id or name (a whole name, or a part only one category contains)."),
+        groups: z.array(z.string()).optional().describe("Category groups to trend, one series each summing the group's categories, by id or name (a whole name, or a part only one group contains)."),
         months: z.number().int().positive().max(MAX_MONTHS).optional().describe(`How many months the window covers, ending at the current month. Defaults to 6, at most ${MAX_MONTHS}.`),
         start: z.string().optional().describe("First month of the window, `YYYY-MM`. Wins over `months`."),
         end: z.string().optional().describe("Last month of the window, `YYYY-MM`, inclusive. Wins over `months`; defaults to the current month."),
@@ -56,18 +56,17 @@ function buildTrend(context: ToolContext, args: TrendArgs): Report {
   // Trending the whole budget is `spending_breakdown` with `group_by: "month"`; asking here with
   // nothing named is a question that has no series in it, so say that rather than answer something else.
   if (categories.length + groups.length === 0) {
-    throw new ToolError("Name at least one category or category group to trend, by id or exact name.");
+    throw new ToolError("Name at least one category or category group to trend, by id or name.");
   }
 
   const budgetId = context.budget.id;
+  // The resolver already named what it matched, so the series are labelled the way the echo is.
   const resolved = resolveFilters(context, { categories, groups });
-  const categoryIds = resolved.categoryIds ?? [];
-  const groupIds = resolved.groupIds ?? [];
-  const categoryNames = context.db.entityLabels(budgetId, "categories", categoryIds);
-  const groupNames = context.db.entityLabels(budgetId, "groups", groupIds);
+  const categoryIds = resolved.ids.categoryIds ?? [];
+  const groupIds = resolved.ids.groupIds ?? [];
   const specs: SeriesSpec[] = [
-    ...categoryIds.map((id) => ({ id, name: categoryNames.get(id) ?? id, kind: "category" as const })),
-    ...groupIds.map((id) => ({ id, name: groupNames.get(id) ?? id, kind: "category_group" as const })),
+    ...(resolved.echo?.categories ?? []).map(({ id, name }) => ({ id, name, kind: "category" as const })),
+    ...(resolved.echo?.groups ?? []).map(({ id, name }) => ({ id, name, kind: "category_group" as const })),
   ];
 
   const months = monthWindow(args.months, args.start, args.end);

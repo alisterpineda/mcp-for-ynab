@@ -108,6 +108,14 @@ export interface SearchFilter extends SpendingFilter {
   maxAmount?: number;
   direction?: "outflow" | "inflow";
   text?: string;
+  /**
+   * True keeps only the lines YNAB would ask to have categorized: on an on-budget account, with no
+   * category, and not a transfer to another on-budget account (which never needs one). False keeps
+   * only the lines that carry a category.
+   */
+  uncategorized?: boolean;
+  approved?: boolean;
+  cleared?: ClearedStatus;
   /** How many lines to return; the totals are unaffected. */
   limit?: number;
 }
@@ -271,6 +279,43 @@ export interface MonthCategoryRangeRow {
   balance: number;
 }
 
+/**
+ * One scheduled transaction as YNAB will post it, with the names a report needs. A split carries
+ * its lines; a plain one has none. `transferAccountOnBudget` says what kind of account a transfer
+ * lands in, which is what decides whether the amount leaves the budget.
+ */
+export interface ScheduledRow {
+  id: string;
+  dateFirst: string;
+  dateNext: string;
+  frequency: string;
+  amount: number;
+  accountId: string;
+  accountName: string;
+  accountOnBudget: boolean;
+  payeeName: string | null;
+  categoryName: string | null;
+  categoryGroupName: string | null;
+  transferAccountId: string | null;
+  transferAccountName: string | null;
+  transferAccountOnBudget: boolean | null;
+  memo: string | null;
+  flagColor: string | null;
+  lines: ScheduledLine[];
+}
+
+export interface ScheduledLine {
+  id: string;
+  amount: number;
+  payeeName: string | null;
+  categoryName: string | null;
+  categoryGroupName: string | null;
+  transferAccountId: string | null;
+  transferAccountName: string | null;
+  transferAccountOnBudget: boolean | null;
+  memo: string | null;
+}
+
 export interface CacheSummary {
   transactions: number;
   /** Transactions that have at least one split line. */
@@ -404,6 +449,9 @@ const ENTITY_TABLES: readonly EntityTable[] = [
       ["account_id", "TEXT NOT NULL", (e) => e.account_id],
       ["payee_id", "TEXT", (e) => e.payee_id ?? null],
       ["category_id", "TEXT", (e) => e.category_id ?? null],
+      ["transfer_account_id", "TEXT", (e) => e.transfer_account_id ?? null],
+      ["memo", "TEXT", (e) => e.memo ?? null],
+      ["flag_color", "TEXT", (e) => e.flag_color ?? null],
     ],
     indexes: ["(budget_id, date_next)"],
   }),
@@ -415,6 +463,8 @@ const ENTITY_TABLES: readonly EntityTable[] = [
       ["amount", "INTEGER NOT NULL", (e) => e.amount],
       ["payee_id", "TEXT", (e) => e.payee_id ?? null],
       ["category_id", "TEXT", (e) => e.category_id ?? null],
+      ["transfer_account_id", "TEXT", (e) => e.transfer_account_id ?? null],
+      ["memo", "TEXT", (e) => e.memo ?? null],
     ],
     indexes: ["(budget_id, scheduled_transaction_id)"],
   }),
@@ -846,10 +896,11 @@ export class BudgetDb {
   }
 
   /**
-   * Turn what a user said into ids. Each string is tried as an id first, then as a whole name,
-   * compared with `fold()` so case, accents, emoji and surrounding whitespace do not matter — never
-   * as a substring. A string that matches nothing, or more than one entity, throws
-   * `NameResolutionError` naming the input and every candidate.
+   * Turn what a user said into ids. Each string is tried as an id first, then as a whole name, then
+   * as a part of a name that exactly one entity contains, all compared with `fold()` so case,
+   * accents, emoji and surrounding whitespace do not matter. A string that matches nothing, or
+   * more than one entity at the step it stops at, throws `NameResolutionError` naming the input
+   * and every candidate.
    */
   resolveEntities(budgetId: string, input: EntityNames): ResolvedEntities {
     const resolved: ResolvedEntities = {};
@@ -880,6 +931,68 @@ export class BudgetDb {
     const rows = this.stmt(`SELECT id, name FROM ${table.table} WHERE budget_id = ?`).all(budgetId);
     const names = new Map(rows.map((r) => [r.id as string, r.name as string]));
     return new Map(ids.filter((id) => names.has(id)).map((id) => [id, names.get(id)!]));
+  }
+
+  /**
+   * Every scheduled transaction, soonest first, each with its split lines by id. A split's line
+   * inherits nothing here — the tool reports the parent and its lines side by side — so a line
+   * names only what it carries.
+   */
+  scheduledRows(budgetId: string): ScheduledRow[] {
+    const rows = this.stmt(
+      `SELECT st.id, st.date_first, st.date_next, st.frequency, st.amount, st.account_id, st.transfer_account_id,
+              st.memo, st.flag_color,
+              COALESCE(a.name, '(unknown account)') AS account_name, COALESCE(a.on_budget, 0) AS account_on_budget,
+              p.name AS payee_name, ${lineCategoryName("st")} AS category_name, ${lineGroupName("st")} AS category_group_name,
+              ta.name AS transfer_account_name, ta.on_budget AS transfer_account_on_budget
+       FROM scheduled_transactions st
+       LEFT JOIN accounts a        ON a.budget_id = $b AND a.id = st.account_id
+       LEFT JOIN accounts ta       ON ta.budget_id = $b AND ta.id = st.transfer_account_id
+       LEFT JOIN payees p          ON p.budget_id = $b AND p.id = st.payee_id
+       LEFT JOIN categories c      ON c.budget_id = $b AND c.id = st.category_id
+       LEFT JOIN category_groups g ON g.budget_id = $b AND g.id = c.category_group_id
+       WHERE st.budget_id = $b
+       ORDER BY st.date_next, st.id`,
+    ).all({ b: budgetId });
+
+    const lines = this.stmt(
+      `SELECT s.id, s.scheduled_transaction_id, s.amount, s.memo, s.transfer_account_id,
+              p.name AS payee_name, ${lineCategoryName("s")} AS category_name, ${lineGroupName("s")} AS category_group_name,
+              ta.name AS transfer_account_name, ta.on_budget AS transfer_account_on_budget
+       FROM scheduled_subtransactions s
+       LEFT JOIN accounts ta       ON ta.budget_id = $b AND ta.id = s.transfer_account_id
+       LEFT JOIN payees p          ON p.budget_id = $b AND p.id = s.payee_id
+       LEFT JOIN categories c      ON c.budget_id = $b AND c.id = s.category_id
+       LEFT JOIN category_groups g ON g.budget_id = $b AND g.id = c.category_group_id
+       WHERE s.budget_id = $b
+       ORDER BY s.id`,
+    ).all({ b: budgetId });
+
+    const byParent = new Map<string, ScheduledLine[]>();
+    for (const r of lines) {
+      const parent = r.scheduled_transaction_id as string;
+      const list = byParent.get(parent) ?? [];
+      list.push(toScheduledLine(r));
+      byParent.set(parent, list);
+    }
+
+    return rows.map((r) => ({
+      ...toScheduledLine(r),
+      dateFirst: r.date_first as string,
+      dateNext: r.date_next as string,
+      frequency: r.frequency as string,
+      accountId: r.account_id as string,
+      accountName: r.account_name as string,
+      accountOnBudget: Number(r.account_on_budget) === 1,
+      flagColor: (r.flag_color as string | null) ?? null,
+      lines: byParent.get(r.id as string) ?? [],
+    }));
+  }
+
+  /** The date of the earliest cached transaction, or null for an empty budget: the register's lower edge. */
+  earliestDate(budgetId: string): string | null {
+    const r = this.stmt(`SELECT MIN(date) AS earliest FROM transactions WHERE budget_id = ?`).get(budgetId);
+    return (r?.earliest as string | null) ?? null;
   }
 
   month(budgetId: string, month: string): MonthRow | null {
@@ -1370,12 +1483,42 @@ const SEARCH_FROM = `
       LEFT JOIN payees p          ON p.budget_id = $b AND p.id = l.payee_id`;
 
 /**
- * A searched line names its category only when it carries one: an uncategorized line and a
- * transfer have nothing to name, and a row saying `Uncategorized` would be a claim about the
- * budget rather than about the line. A category id that no longer resolves is still named.
+ * A line — searched or scheduled — names its category only when it carries one: an uncategorized
+ * line and a transfer have nothing to name, and a row saying `Uncategorized` would be a claim
+ * about the budget rather than about the line. A category id that no longer resolves is still
+ * named. The query must join `categories` as `c` and `category_groups` as `g`; only the line's
+ * own alias varies.
  */
-const SEARCH_CATEGORY_NAME = `CASE WHEN l.category_id IS NULL THEN NULL ELSE COALESCE(c.name, '(deleted category)') END`;
-const SEARCH_GROUP_NAME = `CASE WHEN l.category_id IS NULL THEN NULL ELSE COALESCE(g.name, c.category_group_name) END`;
+const lineCategoryName = (line: string): string =>
+  `CASE WHEN ${line}.category_id IS NULL THEN NULL ELSE COALESCE(c.name, '(deleted category)') END`;
+const lineGroupName = (line: string): string =>
+  `CASE WHEN ${line}.category_id IS NULL THEN NULL ELSE COALESCE(g.name, c.category_group_name) END`;
+const SEARCH_CATEGORY_NAME = lineCategoryName("l");
+const SEARCH_GROUP_NAME = lineGroupName("l");
+
+/** The fields a scheduled transaction and its split lines share, read from either query's row. */
+function toScheduledLine(r: Record<string, unknown>): ScheduledLine {
+  return {
+    id: r.id as string,
+    amount: Number(r.amount),
+    payeeName: (r.payee_name as string | null) ?? null,
+    categoryName: (r.category_name as string | null) ?? null,
+    categoryGroupName: (r.category_group_name as string | null) ?? null,
+    transferAccountId: (r.transfer_account_id as string | null) ?? null,
+    transferAccountName: (r.transfer_account_name as string | null) ?? null,
+    transferAccountOnBudget: r.transfer_account_on_budget === null ? null : Number(r.transfer_account_on_budget) === 1,
+    memo: (r.memo as string | null) ?? null,
+  };
+}
+
+/**
+ * The lines YNAB flags as needing a category, in one place: an on-budget account (a tracking
+ * account never asks for one), no category, and not a transfer to another on-budget account (which
+ * never needs one either). A transfer to a tracking account does need a category, so one without it
+ * is here. `a` is the search's outer-joined accounts row.
+ */
+const UNCATEGORIZED_RULE = `(l.category_id IS NULL AND COALESCE(a.on_budget, 0) = 1
+        AND NOT EXISTS (SELECT 1 FROM accounts ta WHERE ta.budget_id = $b AND ta.id = l.transfer_account_id AND ta.on_budget = 1))`;
 
 /**
  * The spending filter's clauses plus the search-only ones. The amount bounds are on `ABS(amount)`
@@ -1395,6 +1538,16 @@ function searchWhere(budgetId: string, filter: SearchFilter): { where: string[];
     params.maxAmount = filter.maxAmount;
   }
   if (filter.direction !== undefined) where.push(filter.direction === "inflow" ? "l.amount > 0" : "l.amount < 0");
+  if (filter.uncategorized === true) where.push(UNCATEGORIZED_RULE);
+  if (filter.uncategorized === false) where.push("l.category_id IS NOT NULL");
+  if (filter.approved !== undefined) {
+    where.push("l.approved = $approved");
+    params.approved = filter.approved ? 1 : 0;
+  }
+  if (filter.cleared !== undefined) {
+    where.push("l.cleared = $cleared");
+    params.cleared = filter.cleared;
+  }
   if (filter.text !== undefined && filter.text.trim() !== "") {
     where.push(`(LOWER(COALESCE(l.memo, '')) LIKE $text ESCAPE '\\' OR LOWER(COALESCE(p.name, '')) LIKE $text ESCAPE '\\')`);
     params.text = `%${filter.text.trim().toLowerCase().replace(/[\\%_]/g, "\\$&")}%`;
@@ -1409,8 +1562,11 @@ interface ResolvableKind {
   plural: string;
 }
 
-/** The four kinds a name can be resolved against; the table names come from here, never from input. */
-const RESOLVABLE: Record<keyof EntityNames, ResolvableKind> = {
+/**
+ * The four kinds a name can be resolved against; the table names come from here, never from input.
+ * Exported so a caller that walks every kind — the filter echo — reads the same list.
+ */
+export const RESOLVABLE: Record<keyof EntityNames, ResolvableKind> = {
   categories: { table: "categories", key: "categoryIds", singular: "category", plural: "categories" },
   groups: { table: "category_groups", key: "groupIds", singular: "category group", plural: "category groups" },
   payees: { table: "payees", key: "payeeIds", singular: "payee", plural: "payees" },
@@ -1444,15 +1600,34 @@ function resolveOne(value: string, index: EntityIndex, kind: ResolvableKind): st
   const wanted = value.trim();
   if (index.ids.has(wanted)) return wanted;
   const folded = fold(wanted);
-  const matches = folded === "" ? [] : (index.byName.get(folded) ?? []);
-  if (matches.length === 1) return matches[0].id;
-  if (matches.length === 0) throw new NameResolutionError(`No ${kind.singular} named "${wanted}".`);
-  // Every match folds to the same name, so the id is the only thing left to order by.
-  const candidates = [...matches]
-    .sort((a, b) => a.id.localeCompare(b.id))
-    .map((m) => `${m.name} (${m.id})`)
-    .join(", ");
-  throw new NameResolutionError(`"${wanted}" matches several ${kind.plural}: ${candidates}. Use the id.`);
+  if (folded === "") throw new NameResolutionError(`No ${kind.singular} named "${wanted}".`);
+
+  const exact = index.byName.get(folded) ?? [];
+  if (exact.length === 1) return exact[0].id;
+  if (exact.length > 1) {
+    // Every match folds to the same name, so the id is the only thing left to order by.
+    throw new NameResolutionError(`"${wanted}" matches several ${kind.plural}: ${candidates(exact)}. Use the id.`);
+  }
+
+  // No whole name matched: a part of a name is accepted when only one entity contains it, which
+  // is what "costco" means when the payee is "Costco Wholesale". Two containing it is a question
+  // back, with the candidates, since guessing between them would narrow the numbers silently.
+  const partial = [...index.byName.entries()].filter(([name]) => name.includes(folded)).flatMap(([, rows]) => rows);
+  if (partial.length === 1) return partial[0].id;
+  if (partial.length === 0) throw new NameResolutionError(`No ${kind.singular} named "${wanted}".`);
+  throw new NameResolutionError(
+    `No ${kind.singular} named "${wanted}"; ${partial.length} ${kind.plural} contain it: ${candidates(partial)}. Use the whole name or the id.`,
+  );
+}
+
+/** The most candidates an error names: a short fragment can match most of a budget's payees. */
+const MAX_CANDIDATES = 10;
+
+function candidates(rows: EntityRow[]): string {
+  const sorted = [...rows].sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  const named = sorted.slice(0, MAX_CANDIDATES).map((m) => `${m.name} (${m.id})`);
+  if (sorted.length > MAX_CANDIDATES) named.push(`and ${sorted.length - MAX_CANDIDATES} more`);
+  return named.join(", ");
 }
 
 function toTransactionLine(r: Record<string, unknown>): TransactionLine {

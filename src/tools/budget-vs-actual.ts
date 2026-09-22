@@ -11,7 +11,7 @@ const description = `Which categories do we keep overspending? Assigned against 
 
 Each row sums \`assigned\` and \`activity\` over the window, carries \`available\` as the category's balance at the end of the last month (absent when YNAB has no figures for that month yet), and counts the months that ended in the red (\`overspent_months\`) and the months where spending ran past the assignment (\`over_assigned_months\`). Those two answer different questions: a category can be overspent because last month's balance was already gone, and it can outrun its assignment while a carried-over balance keeps it black. \`activity\` keeps YNAB's sign, so spending is negative and a net refund is positive.
 
-The window is the last six months ending at the current month; \`months\` changes how many, and \`start\` and \`end\` as \`YYYY-MM\` win over it. Categories with nothing assigned, no activity and no balance in every month are left out and counted in \`categories_omitted\`. Rows come most-overspent first, then biggest spender. \`include_months: true\` adds the per-month figures to each row. Hidden categories are included and marked \`hidden\`; credit card payment categories are included and marked \`credit_card_payment\`, and their activity is YNAB's own figure for the card — spending moved onto it minus payments made — not spending in itself. The current month is still being lived in, so it is reported as \`partial_month\` and left out of both counts — \`include_partial: true\` counts it — while its assigned and activity still add into the totals. \`categories\` and \`groups\` narrow the report, by id or exact name.
+The window is the last six months ending at the current month; \`months\` changes how many, and \`start\` and \`end\` as \`YYYY-MM\` win over it. Categories with nothing assigned, no activity and no balance in every month are left out and counted in \`categories_omitted\`. Rows come most-overspent first, then biggest spender. \`include_months: true\` adds the per-month figures to each row. Hidden categories are included and marked \`hidden\`; credit card payment categories are included and marked \`credit_card_payment\`, and their activity is YNAB's own figure for the card — spending moved onto it minus payments made — not spending in itself. The current month is still being lived in, so it is reported as \`partial_month\` and left out of both counts — \`include_partial: true\` counts it — while its assigned and activity still add into the totals. \`categories\` and \`groups\` narrow the report, by id or name — a whole name first, else a part that only one entity contains — and \`filters\` in the response names what they resolved to.
 
 ${SHARED_NOTES}`;
 
@@ -25,8 +25,8 @@ export function registerBudgetVsActual(server: McpServer, store: BudgetStore): v
         months: z.number().int().positive().max(MAX_MONTHS).optional().describe(`How many months the window covers, ending at the current month. Defaults to 6, at most ${MAX_MONTHS}.`),
         start: z.string().optional().describe("First month of the window, `YYYY-MM`. Wins over `months`."),
         end: z.string().optional().describe("Last month of the window, `YYYY-MM`, inclusive. Wins over `months`; defaults to the current month."),
-        categories: z.array(z.string()).optional().describe("Only these categories, by id or exact name."),
-        groups: z.array(z.string()).optional().describe("Only the categories in these category groups, by id or exact name."),
+        categories: z.array(z.string()).optional().describe("Only these categories, by id or name."),
+        groups: z.array(z.string()).optional().describe("Only the categories in these category groups, by id or name."),
         include_months: z.boolean().optional().describe("Add each category's month-by-month assigned, activity and available. Off by default."),
         include_partial: z.boolean().optional().describe("Count the current, unfinished month in `overspent_months` and `over_assigned_months`. Off by default."),
         refresh: z.boolean().optional().describe("Pull the latest changes from YNAB before reporting, even if the cache is recent."),
@@ -53,7 +53,8 @@ interface Bucket {
 }
 
 function buildComparison(context: ToolContext, args: ComparisonArgs): Report {
-  const filter = resolveFilters(context, { categories: args.categories, groups: args.groups });
+  const resolved = resolveFilters(context, { categories: args.categories, groups: args.groups });
+  const filter = resolved.ids;
   const months = monthWindow(args.months, args.start, args.end);
   const partialMonth = months.includes(currentMonth()) ? currentMonth() : null;
   const countPartial = args.include_partial === true;
@@ -126,6 +127,7 @@ function buildComparison(context: ToolContext, args: ComparisonArgs): Report {
 
   const body: Report = { start: months[0], end: months[months.length - 1] };
   if (partialMonth) body.partial_month = partialMonth;
+  if (resolved.echo) body.filters = resolved.echo;
   body.categories_omitted = omitted;
   body.rows = ranked.map((entry) => entry.row);
   return body;
