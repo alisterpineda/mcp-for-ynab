@@ -8,6 +8,10 @@
   "author": {
     "name": "Alister Pineda"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alisterpineda/ynab-mcp"
+  },
   "server": {
     "type": "node",
     "entry_point": "server/index.js",

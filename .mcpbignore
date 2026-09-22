@@ -4,3 +4,5 @@ package-lock.json
 test/
 .env
 .env.example
+.scratch/
+.github/
