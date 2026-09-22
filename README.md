@@ -79,7 +79,8 @@ in order and its income sources by amount, `spending_breakdown` sorts its rows b
   left out of the summaries unless `include_partial` is set.
 - `spending_breakdown` — where the money went: spending over a date range grouped by `category` (the
   default), `category_group`, `payee`, `account` or `month`. Each row carries `spent`, the line
-  `count` and its `share` of the total; rows past the cap (25, or `limit`) are summed into `other`,
+  `count`, `months_active` (how many months had a line, which tells a monthly charge from a
+  one-off; month rows leave it out) and its `share` of the total; rows past the cap (25, or `limit`) are summed into `other`,
   and a month grouping is zero-filled from the budget's first month on and never capped. `start` and
   `end` take `YYYY-MM-DD` or `YYYY-MM` and default to the current month to date. The `categories`,
   `groups`, `payees` and `accounts` filters take ids or names — a whole name first, else a part that

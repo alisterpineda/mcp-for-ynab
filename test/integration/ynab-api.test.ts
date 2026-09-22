@@ -173,6 +173,17 @@ function assertSpending(db: BudgetDb, budget: SyncedBudget): void {
     assert.equal(sum(db.trackingTransfers(budget.id, range).map((r) => r.amount)), flow.toTracking, `${month}: tracking accounts sum to their share`);
   }
 
+  // A category's months_active, counted by the grouped query, is the number of months the monthly
+  // query finds it in: two separate paths to the same count, over the whole history.
+  const monthsSeen = new Map<string, number>();
+  for (const row of db.spendingByMonth(budget.id, "category")) {
+    if (row.key !== null) monthsSeen.set(row.key, (monthsSeen.get(row.key) ?? 0) + 1);
+  }
+  for (const row of db.spendingBy(budget.id, "category")) {
+    // Uncategorized and deleted categories share the monthly query's null key, so only named ones compare.
+    if (row.key !== null) assert.equal(row.months, monthsSeen.get(row.key), `${row.name}: months_active vs the months it appears in`);
+  }
+
   // Every scheduled transaction lands on a cached account with a frequency the tool can rate.
   for (const row of db.scheduledRows(budget.id)) {
     assert.notEqual(row.accountName, "(unknown account)", `scheduled ${row.id} has its account cached`);

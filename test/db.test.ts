@@ -752,58 +752,58 @@ describe("BudgetDb.spendingBy", () => {
     assert.deepEqual(
       db.spendingBy(BUDGET_ID, "category", ALL),
       [
-        { key: "c4", name: "Mortgage", groupName: "Housing", hidden: false, count: 3, spent: -450_000 },
-        { key: "c1", name: "Groceries", groupName: "Everyday", hidden: false, count: 5, spent: -265_000 },
-        { key: "c2", name: "Household", groupName: "Everyday", hidden: false, count: 3, spent: -100_000 },
-        { key: "c3", name: "Dining Out", groupName: "Everyday", hidden: false, count: 4, spent: -64_000 },
-        { key: null, name: "Uncategorized", groupName: "Uncategorized", hidden: false, count: 1, spent: -25_000 },
-        { key: "c8", name: "Old hobby", groupName: "Everyday", hidden: true, count: 1, spent: -15_000 },
-        { key: null, name: "(deleted category)", groupName: "(unknown group)", hidden: false, count: 1, spent: -5_000 },
+        { key: "c4", name: "Mortgage", groupName: "Housing", hidden: false, count: 3, spent: -450_000, months: 3 },
+        { key: "c1", name: "Groceries", groupName: "Everyday", hidden: false, count: 5, spent: -265_000, months: 3 },
+        { key: "c2", name: "Household", groupName: "Everyday", hidden: false, count: 3, spent: -100_000, months: 3 },
+        { key: "c3", name: "Dining Out", groupName: "Everyday", hidden: false, count: 4, spent: -64_000, months: 3 },
+        { key: null, name: "Uncategorized", groupName: "Uncategorized", hidden: false, count: 1, spent: -25_000, months: 1 },
+        { key: "c8", name: "Old hobby", groupName: "Everyday", hidden: true, count: 1, spent: -15_000, months: 1 },
+        { key: null, name: "(deleted category)", groupName: "(unknown group)", hidden: false, count: 1, spent: -5_000, months: 1 },
       ],
     );
   });
 
   it("groups by category group", () => {
     assert.deepEqual(db.spendingBy(BUDGET_ID, "category_group", ALL), [
-      { key: "g2", name: "Housing", count: 3, spent: -450_000 },
-      { key: "g1", name: "Everyday", count: 13, spent: -444_000 },
-      { key: null, name: "Uncategorized", count: 1, spent: -25_000 },
-      { key: null, name: "(unknown group)", count: 1, spent: -5_000 },
+      { key: "g2", name: "Housing", count: 3, spent: -450_000, months: 3 },
+      { key: "g1", name: "Everyday", count: 13, spent: -444_000, months: 3 },
+      { key: null, name: "Uncategorized", count: 1, spent: -25_000, months: 1 },
+      { key: null, name: "(unknown group)", count: 1, spent: -5_000, months: 1 },
     ]);
   });
 
   it("groups by payee, with a bucket for lines that have none", () => {
     assert.deepEqual(db.spendingBy(BUDGET_ID, "payee", ALL), [
-      { key: "pt3", name: "Transfer : Mortgage", count: 3, spent: -450_000 },
-      { key: "p1", name: "Costco", count: 5, spent: -250_000 },
-      { key: "p9", name: "Hardware Depot", count: 2, spent: -70_000 },
-      { key: "p8", name: "Farm Market", count: 1, spent: -45_000 },
-      { key: "p2", name: "Café Luna", count: 2, spent: -38_000 },
-      { key: "p3", name: "Corner Diner", count: 2, spent: -26_000 },
-      { key: "p6", name: "Corner Store", count: 1, spent: -25_000 },
-      { key: "p7", name: "Hobby Shop", count: 1, spent: -15_000 },
-      { key: null, name: "(no payee)", count: 1, spent: -5_000 },
+      { key: "pt3", name: "Transfer : Mortgage", count: 3, spent: -450_000, months: 3 },
+      { key: "p1", name: "Costco", count: 5, spent: -250_000, months: 3 },
+      { key: "p9", name: "Hardware Depot", count: 2, spent: -70_000, months: 2 },
+      { key: "p8", name: "Farm Market", count: 1, spent: -45_000, months: 1 },
+      { key: "p2", name: "Café Luna", count: 2, spent: -38_000, months: 2 },
+      { key: "p3", name: "Corner Diner", count: 2, spent: -26_000, months: 2 },
+      { key: "p6", name: "Corner Store", count: 1, spent: -25_000, months: 1 },
+      { key: "p7", name: "Hobby Shop", count: 1, spent: -15_000, months: 1 },
+      { key: null, name: "(no payee)", count: 1, spent: -5_000, months: 1 },
     ]);
   });
 
   it("groups by account", () => {
     assert.deepEqual(db.spendingBy(BUDGET_ID, "account", ALL), [
-      { key: "a1", name: "Chequing", count: 14, spent: -838_000 },
-      { key: "a2", name: "Visa", count: 4, spent: -86_000 },
+      { key: "a1", name: "Chequing", count: 14, spent: -838_000, months: 3 },
+      { key: "a2", name: "Visa", count: 4, spent: -86_000, months: 3 },
     ]);
   });
 
   it("groups by month, chronologically", () => {
     assert.deepEqual(db.spendingBy(BUDGET_ID, "month", ALL), [
-      { key: "2026-07", name: "2026-07", count: 9, spent: -307_000 },
-      { key: "2026-08", name: "2026-08", count: 5, spent: -333_000 },
-      { key: "2026-09", name: "2026-09", count: 4, spent: -284_000 },
+      { key: "2026-07", name: "2026-07", count: 9, spent: -307_000, months: 1 },
+      { key: "2026-08", name: "2026-08", count: 5, spent: -333_000, months: 1 },
+      { key: "2026-09", name: "2026-09", count: 4, spent: -284_000, months: 1 },
     ]);
   });
 
   it("applies the same filters as spendingLines", () => {
     assert.deepEqual(db.spendingBy(BUDGET_ID, "category", { ...JULY, categoryIds: ["c1"] }), [
-      { key: "c1", name: "Groceries", groupName: "Everyday", hidden: false, count: 2, spent: -50_000 },
+      { key: "c1", name: "Groceries", groupName: "Everyday", hidden: false, count: 2, spent: -50_000, months: 1 },
     ]);
   });
 });

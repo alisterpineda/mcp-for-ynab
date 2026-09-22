@@ -152,6 +152,8 @@ export interface SpendingAggregate {
   hidden?: boolean;
   count: number;
   spent: number;
+  /** How many distinct months have a line: a monthly charge against a one-off. 1 for a month row with a line, 0 for a zero-filled one. */
+  months: number;
 }
 
 export type SpendingGroupBy = "category" | "category_group" | "payee" | "account" | "month";
@@ -829,7 +831,7 @@ export class BudgetDb {
     const sql = `
       WITH lines AS (${LINES_CTE})
       SELECT ${grouping.key} AS key, ${grouping.name} AS name, ${grouping.extra}
-             COUNT(*) AS count, SUM(l.amount) AS spent
+             COUNT(*) AS count, SUM(l.amount) AS spent, COUNT(DISTINCT SUBSTR(l.date, 1, 7)) AS months
       ${SPENDING_FROM}
       WHERE ${[SPENDING_RULE, ...where].join(" AND ")}
       GROUP BY ${grouping.key}, ${grouping.name}
@@ -842,6 +844,7 @@ export class BudgetDb {
           name: r.name as string,
           count: Number(r.count),
           spent: Number(r.spent),
+          months: Number(r.months),
         };
         if (groupBy === "category") {
           row.groupName = r.group_name as string;

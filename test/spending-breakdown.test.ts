@@ -10,6 +10,8 @@ interface Row {
   hidden?: boolean;
   spent: number;
   count: number;
+  /** Every row but a month row. */
+  months_active?: number;
   share: number;
 }
 
@@ -51,10 +53,10 @@ describe("spending_breakdown", () => {
     await using h = await spending();
     const body = await h.json("spending_breakdown", { start: "2026-08", end: "2026-08" });
     assert.deepEqual(rowsOf(body), [
-      { id: "c4", name: "Mortgage", group: "Housing", spent: 150, count: 1, share: 45 },
-      { id: "c1", name: "Groceries", group: "Everyday", spent: 135, count: 2, share: 40.5 },
-      { id: "c2", name: "Household", group: "Everyday", spent: 30, count: 1, share: 9 },
-      { id: "c3", name: "Dining Out", group: "Everyday", spent: 18, count: 1, share: 5.4 },
+      { id: "c4", name: "Mortgage", group: "Housing", spent: 150, count: 1, months_active: 1, share: 45 },
+      { id: "c1", name: "Groceries", group: "Everyday", spent: 135, count: 2, months_active: 1, share: 40.5 },
+      { id: "c2", name: "Household", group: "Everyday", spent: 30, count: 1, months_active: 1, share: 9 },
+      { id: "c3", name: "Dining Out", group: "Everyday", spent: 18, count: 1, months_active: 1, share: 5.4 },
     ]);
     assert.ok(!("other" in body), "nothing was cut, so there is no remainder row");
   });
@@ -73,8 +75,8 @@ describe("spending_breakdown", () => {
     await using h = await spending();
     const body = await h.json("spending_breakdown", { start: "2026-07-05", end: "2026-07-05" });
     assert.deepEqual(rowsOf(body), [
-      { id: "c1", name: "Groceries", group: "Everyday", spent: 50, count: 2, share: 62.5 },
-      { id: "c2", name: "Household", group: "Everyday", spent: 30, count: 1, share: 37.5 },
+      { id: "c1", name: "Groceries", group: "Everyday", spent: 50, count: 2, months_active: 1, share: 62.5 },
+      { id: "c2", name: "Household", group: "Everyday", spent: 30, count: 1, months_active: 1, share: 37.5 },
     ]);
   });
 
@@ -323,7 +325,7 @@ describe("spending_breakdown", () => {
     const { text } = await h.call("spending_breakdown", { start: "2026-08", end: "2026-08", limit: 1 });
     const body = JSON.parse(text) as Record<string, unknown>;
     assert.equal(body.total, 0);
-    assert.deepEqual(rowsOf(body), [{ id: "c1", name: "Groceries", group: "Everyday", spent: 10, count: 1, share: 0 }]);
+    assert.deepEqual(rowsOf(body), [{ id: "c1", name: "Groceries", group: "Everyday", spent: 10, count: 1, months_active: 1, share: 0 }]);
     assert.deepEqual(body.other, { count: 1, spent: -10, share: 0 });
     assert.ok(!text.includes("null"), text);
   });
@@ -345,6 +347,7 @@ interface BucketRow {
   name: string;
   spent: number;
   count: number;
+  months_active: number;
   share: number;
   groups?: { id: string; name: string }[];
   categories?: { id: string; name: string }[];
@@ -378,6 +381,7 @@ describe("spending_breakdown with buckets", () => {
         name: "Home",
         spent: 180,
         count: 2,
+        months_active: 1,
         share: 54.1,
         groups: [
           { id: "g1", name: "Everyday" },
@@ -388,6 +392,7 @@ describe("spending_breakdown with buckets", () => {
         name: "Food",
         spent: 153,
         count: 3,
+        months_active: 1,
         share: 45.9,
         categories: [
           { id: "c1", name: "Groceries" },
@@ -624,5 +629,65 @@ describe("spending_breakdown refusing buckets it cannot honour", () => {
   it("refuses buckets alongside group_by, since each is a grouping", async () => {
     const text = await refusal({ group_by: "payee", buckets: [{ name: "Food", categories: ["Groceries"] }] });
     assert.match(text, /leave out `group_by`/);
+  });
+});
+
+describe("spending_breakdown months_active", () => {
+  it("counts the months a row had a line in, apart from how many lines it had", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", { start: "2026-07", end: "2026-09", group_by: "payee" });
+    const row = (name: string) => byName(body, name);
+    // Costco: July's three split lines, then one line each in August and September.
+    assert.deepEqual([row("Costco").count, row("Costco").months_active], [5, 3]);
+    assert.deepEqual([row("Café Luna").count, row("Café Luna").months_active], [2, 2]);
+    assert.deepEqual([row("Farm Market").count, row("Farm Market").months_active], [1, 1]);
+  });
+
+  it("leaves it off month rows, which are one month each by definition", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", { start: "2026-07", end: "2026-09", group_by: "month" });
+    assert.ok(rowsOf(body).every((r) => !("months_active" in r)));
+  });
+
+  it("counts a bucket's months once however many of its categories spent in them", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", {
+      start: "2026-07",
+      end: "2026-09",
+      buckets: [
+        { name: "Food", categories: ["Groceries", "Dining Out"] },
+        { name: "Hobbies", categories: ["Old hobby"] },
+        { name: "Retired", categories: ["Retired"] },
+      ],
+    });
+    const active = Object.fromEntries(bucketsOf(body).map((r) => [r.name, r.months_active]));
+    // Groceries and dining each spent in all three months: three active months, not six.
+    assert.deepEqual(active, { Food: 3, Hobbies: 1, Retired: 0 });
+    // The unassigned categories carry theirs as ordinary category rows do.
+    const household = (body.unassigned as Unassigned).categories.find((r) => r.name === "Household");
+    assert.equal(household?.months_active, 3);
+  });
+
+  it("counts every month any of a bucket's categories spent in, not just the busiest category's", async () => {
+    await using h = await spending();
+    // Old hobby spent only in July and Household only in August within this range.
+    const body = await h.json("spending_breakdown", {
+      start: "2026-07-20",
+      end: "2026-08-31",
+      buckets: [{ name: "Mixed", categories: ["Old hobby", "Household"] }],
+    });
+    assert.equal(bucketsOf(body)[0].months_active, 2);
+  });
+
+  it("counts a bucket's months from only the lines the filters keep", async () => {
+    await using h = await spending();
+    // Unfiltered, Food spent in all three months; Farm Market's one line is in August.
+    const body = await h.json("spending_breakdown", {
+      start: "2026-07",
+      end: "2026-09",
+      payees: ["Farm Market"],
+      buckets: [{ name: "Food", categories: ["Groceries", "Dining Out"] }],
+    });
+    assert.equal(bucketsOf(body)[0].months_active, 1);
   });
 });

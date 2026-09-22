@@ -70,7 +70,7 @@
     },
     {
       "name": "spending_breakdown",
-      "description": "Spending over a date range grouped by category, category group, payee, account, month or your own buckets of categories, with shares, an `other` remainder and what the rule excluded."
+      "description": "Spending over a date range grouped by category, category group, payee, account, month or your own buckets of categories, with shares, months active, an `other` remainder and what the rule excluded."
     },
     {
       "name": "spending_trend",

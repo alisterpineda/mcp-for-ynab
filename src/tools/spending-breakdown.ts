@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { SpendingAggregate, SpendingFilter, SpendingGroupBy } from "../cache/db.js";
+import type { MonthlySpending, SpendingAggregate, SpendingFilter, SpendingGroupBy } from "../cache/db.js";
 import type { BudgetStore } from "../cache/store.js";
 import { BUCKET_RULES, bucketEcho, bucketsParameter, resolveBuckets, UNCLAIMED, type BucketInput, type Bucketing } from "./buckets.js";
 import { dateRange, historyStart, monthWindow } from "./dates.js";
@@ -21,7 +21,7 @@ const description = `Where the money went: spending over a date range, grouped b
 
 ${SCOPE} It matches YNAB's Spending report: a transfer to a tracking account (a mortgage payment) counts in its category, or as \`Uncategorized\` until it has one; refunds net against their category; each split line lands in its own category. A deleted category shows as \`(deleted category)\`, so the rows always add up to \`total\`.
 
-Rows are sorted by \`spent\` descending and carry \`spent\` (negative for a net refund), a \`count\` of lines and a \`share\` of \`total\` in percent. Category rows carry their \`group\`, and a hidden category is marked \`hidden\`, not dropped. Rows past the first 25 (\`limit\`) are summed into \`other\`. \`group_by: "month"\` gives one row per month in chronological order, zero-filled and never capped, from the budget's first month on (\`history_starts\` says when that cut the range). The filter lists are ORed inside and ANDed across, and \`filters\` names what each resolved to.
+Rows are sorted by \`spent\` descending and carry \`spent\` (negative for a net refund), a \`count\` of lines, \`months_active\` (months with one) and a \`share\` of \`total\` in percent. Category rows carry their \`group\`, and a hidden category is marked \`hidden\`, not dropped. Rows past the first 25 (\`limit\`) are summed into \`other\`. \`group_by: "month"\` gives one row per month in chronological order, zero-filled and never capped, from the budget's first month on (\`history_starts\` says when that cut it). The filter lists are ORed inside and ANDed across, and \`filters\` names what each resolved to.
 
 ${SHARED_NOTES}`;
 
@@ -92,7 +92,10 @@ function buildBreakdown(context: ToolContext, args: BreakdownArgs): Report {
   body.scope = SCOPE;
   body.excluded = context.db.spendingExclusions(budgetId, filter);
 
-  if (bucketing) return { ...body, ...bucketRows(context, bucketing, context.db.spendingBy(budgetId, "category", filter), total.spent) };
+  if (bucketing) {
+    const categories = context.db.spendingBy(budgetId, "category", filter);
+    return { ...body, ...bucketRows(context, bucketing, categories, context.db.spendingByMonth(budgetId, "category", filter), total.spent) };
+  }
 
   const aggregates = context.db.spendingBy(budgetId, groupBy, filter);
   const rows = groupBy === "month" ? gapFill(aggregates, from, to, floor) : aggregates;
@@ -113,22 +116,32 @@ function buildBreakdown(context: ToolContext, args: BreakdownArgs): Report {
 /**
  * The breakdown by the caller's buckets: each bucket's category rows summed in milliunits and
  * rendered once, and the rows no bucket claims listed category by category under `unassigned`.
+ * A bucket's `months_active` cannot be added up from its categories' — two categories active in
+ * the same month make one active month — so it counts the months in the per-month rows instead.
  * The category rows add up to the total and each lands in exactly one bucket or in `unassigned`,
  * so the bucket rows and `unassigned` add up to it as well. Every bucket gets a row, even one
  * that spent nothing, because a missing row would read as a bucket that was never asked for.
  */
-function bucketRows(context: ToolContext, bucketing: Bucketing, categories: SpendingAggregate[], total: number): Report {
+function bucketRows(
+  context: ToolContext,
+  bucketing: Bucketing,
+  categories: SpendingAggregate[],
+  monthly: MonthlySpending[],
+  total: number,
+): Report {
   const { assigned, unassigned } = bucketing.partition(categories);
-  const sums = bucketing.buckets.map((bucket, index) => ({ bucket, ...summed(assigned[index]) }));
+  const active = bucketing.partition(monthly).assigned.map((rows) => new Set(rows.map((row) => row.month)).size);
+  const sums = bucketing.buckets.map((bucket, index) => ({ bucket, monthsActive: active[index], ...summed(assigned[index]) }));
   // Most spent first, as every grouping is; the sums are negative, so ascending. The sort is
   // stable, so buckets that spent the same keep the order they were given in.
   sums.sort((a, b) => a.spent - b.spent);
 
   const result: Report = {
-    rows: sums.map(({ bucket, count, spent }) => ({
+    rows: sums.map(({ bucket, count, spent, monthsActive }) => ({
       name: bucket.name,
       spent: context.money(-spent),
       count,
+      months_active: monthsActive,
       share: share(spent, total),
       ...bucketEcho(bucket),
     })),
@@ -158,6 +171,8 @@ function render(context: ToolContext, row: SpendingAggregate, groupBy: SpendingG
   if (groupBy === "category" && row.groupName) rendered.group = row.groupName;
   rendered.spent = context.money(-row.spent);
   rendered.count = row.count;
+  // A month row is one month by definition, so the count would say nothing.
+  if (groupBy !== "month") rendered.months_active = row.months;
   rendered.share = share(row.spent, total);
   if (row.hidden) rendered.hidden = true;
   return rendered;
@@ -179,5 +194,5 @@ function gapFill(aggregates: SpendingAggregate[], from: string, to: string, floo
   const [first, last] = [floor !== null && floor > from.slice(0, 7) ? floor : from.slice(0, 7), to.slice(0, 7)];
   // A range that ends before the budget begins has no months to show, and no spending either.
   if (first > last) return [];
-  return monthWindow(undefined, first, last).map((month) => found.get(month) ?? { key: month, name: month, count: 0, spent: 0 });
+  return monthWindow(undefined, first, last).map((month) => found.get(month) ?? { key: month, name: month, count: 0, spent: 0, months: 0 });
 }
