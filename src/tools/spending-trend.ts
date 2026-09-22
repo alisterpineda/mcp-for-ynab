@@ -6,12 +6,13 @@ import { BUCKET_RULES, bucketEcho, bucketsParameter, resolveBuckets, UNCLAIMED, 
 import { historyStart, historyWindow, MAX_MONTHS, monthWindow } from "./dates.js";
 import { REFRESH, respond, SHARED_NOTES, ToolError, type Report, type ToolContext } from "./envelope.js";
 import { BY_ID_OR_NAME, resolveFilters } from "./filters.js";
+import { median } from "./stats.js";
 
-const description = `Is it creeping up? A month-by-month series of spending for the categories or category groups you name, with the average, the lowest month and the highest. This is the tool for "how has dining out gone over the last six months?" and "are we spending more on groceries than we used to?".
+const description = `Is it creeping up? A month-by-month series of spending for the categories or category groups you name, with the average, median, lowest and highest month. This is the tool for "how has dining out gone over the last six months?" and "are we spending more on groceries than we used to?".
 
 Name at least one of \`categories\`, \`groups\` or \`buckets\`. Each category or group is a series in the order asked, named by \`id\` and \`name\` so a partial name shows what it landed on; a group series sums its categories. Bucket series follow, with no \`id\`. The window is the last six months ending at the current one, and never runs past it. Nor does it reach back before the budget: a window that would starts at the budget's first month, named by \`history_starts\`, so the series is shorter than asked and the statistics cover only months the budget existed in. Every month is present in chronological order, and one with no activity reads \`spent: 0\`.
 
-\`spent\` is positive for spending and negative for a month that netted a refund, counted by the same rule as \`spending_breakdown\`: a categorized transfer to a tracking account counts, transfers between budget accounts and income do not, and each split line lands in its own category. The current month is flagged \`partial\` and left out of \`average\`, \`min\` and \`max\` unless \`include_partial\` is set; with no complete month in the window those keys are absent rather than guessed.
+\`spent\` is positive for spending and negative for a month that netted a refund, counted by the same rule as \`spending_breakdown\`: a categorized transfer to a tracking account counts, transfers between budget accounts and income do not, and each split line lands in its own category. The current month is flagged \`partial\` and left out of \`average\`, \`median\`, \`min\` and \`max\` unless \`include_partial\` is set; with no complete month those keys are absent rather than guessed.
 
 ${SHARED_NOTES}`;
 
@@ -30,7 +31,7 @@ export function registerSpendingTrend(server: McpServer, store: BudgetStore): vo
         months: z.number().int().positive().max(MAX_MONTHS).optional().describe(`How many months the window covers, ending at the current month. Defaults to 6, at most ${MAX_MONTHS}.`),
         start: z.string().optional().describe("First month of the window, `YYYY-MM`. Wins over `months`."),
         end: z.string().optional().describe("Last month of the window, `YYYY-MM`, inclusive. Wins over `months`; defaults to the current month and cannot be later."),
-        include_partial: z.boolean().optional().describe("Count the current, unfinished month in `average`, `min` and `max`. Off by default."),
+        include_partial: z.boolean().optional().describe("Count the current, unfinished month in `average`, `median`, `min` and `max`. Off by default."),
         refresh: z.boolean().optional().describe(REFRESH),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
@@ -157,6 +158,7 @@ function figures(
   const series: Report = { months: points };
   if (counted.length > 0) {
     series.average = context.money(counted.reduce((sum, value) => sum + value, 0) / counted.length);
+    series.median = context.money(median(counted));
     series.min = context.money(Math.min(...counted));
     series.max = context.money(Math.max(...counted));
   }

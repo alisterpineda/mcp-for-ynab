@@ -74,7 +74,7 @@
     },
     {
       "name": "spending_trend",
-      "description": "Month-by-month spending for named categories, category groups or your own buckets of categories, with average, min and max over the complete months."
+      "description": "Month-by-month spending for named categories, category groups or your own buckets of categories, with average, median, min and max over the complete months."
     },
     {
       "name": "search_transactions",

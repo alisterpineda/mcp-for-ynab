@@ -97,7 +97,7 @@ in order and its income sources by amount, `spending_breakdown` sorts its rows b
   a group series summing its categories. The window is the last six months ending at the current
   one; `months` changes how many and `start`/`end` as `YYYY-MM` win over it. A window reaching back
   before the budget's history is cut at its first month and says so under `history_starts`. Months
-  with no activity read as zero, and each series carries `average`, `min` and `max` over the complete
+  with no activity read as zero, and each series carries `average`, `median`, `min` and `max` over the complete
   months — the current month is flagged `partial` and left out unless `include_partial` is set.
   `buckets` works as it does for `spending_breakdown`: each bucket becomes a series after the ones
   named, and what no bucket claims becomes an `unassigned` series, so the bucket series and

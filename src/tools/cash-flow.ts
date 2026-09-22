@@ -4,6 +4,7 @@ import type { CashFlowMonth, FlowAggregate } from "../cache/db.js";
 import type { BudgetStore } from "../cache/store.js";
 import { dateRange, historyStart, historyWindow, MAX_MONTHS, monthWindow } from "./dates.js";
 import { REFRESH, respond, SHARED_NOTES, type Report, type ToolContext } from "./envelope.js";
+import { median } from "./stats.js";
 
 /** How many income sources are listed before the rest is summed into `income_sources_other`. */
 const SOURCE_LIMIT = 25;
@@ -180,13 +181,6 @@ function medians(context: ToolContext, rows: Flow[]): Report {
   });
   if (ratios.length > 0) result.savings_rate = percent(median(ratios));
   return result;
-}
-
-/** The middle value, or the mean of the two middle values. Never called with an empty list. */
-function median(values: number[]): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 1 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
 /** A ratio as a percentage to one decimal, rounded once from the unrounded ratio. */

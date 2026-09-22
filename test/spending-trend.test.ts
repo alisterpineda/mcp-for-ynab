@@ -15,6 +15,7 @@ interface Series {
   kind: "category" | "category_group";
   months: Point[];
   average?: number;
+  median?: number;
   min?: number;
   max?: number;
 }
@@ -64,6 +65,7 @@ describe("spending_trend", () => {
         { month: "2026-08", spent: 135 },
       ],
       average: 92.5,
+      median: 92.5,
       min: 50,
       max: 135,
     });
@@ -76,6 +78,7 @@ describe("spending_trend", () => {
         { month: "2026-08", spent: 18 },
       ],
       average: 25,
+      median: 25,
       min: 18,
       max: 32,
     });
@@ -114,6 +117,7 @@ describe("spending_trend", () => {
         { month: "2026-08", spent: 183 },
       ],
       average: 155,
+      median: 155,
       min: 127,
       max: 183,
     });
@@ -179,7 +183,7 @@ describe("spending_trend and the month still being lived in", () => {
     const body = await h.json("spending_trend", { categories: ["Groceries"], months: 1 });
     const series = seriesOf(body)[0];
     assert.deepEqual(series.months, [{ month: monthFromNow(0), spent: 5, partial: true }]);
-    for (const key of ["average", "min", "max"]) {
+    for (const key of ["average", "median", "min", "max"]) {
       assert.ok(!(key in series), `${key} has no honest value here, so it has no key either`);
     }
   });
@@ -189,6 +193,32 @@ describe("spending_trend and the month still being lived in", () => {
     const body = await h.json("spending_trend", { categories: ["Groceries"], start: "2026-07", end: "2026-08" });
     assert.ok(!("partial_month" in body), "the window is over; no month in it is still moving");
     assert.ok(seriesOf(body)[0].months.every((point) => !("partial" in point)));
+  });
+});
+
+describe("spending_trend median", () => {
+  it("gives the middle month, which one big month cannot drag the way it drags the average", async () => {
+    const [third, second, first, current] = [-3, -2, -1, 0].map(monthFromNow);
+    await using h = await harness({
+      budget: spendingBudget({
+        first_month: `${third}-01`,
+        months: [],
+        subtransactions: [],
+        transactions: [
+          transaction("m3", `${third}-05`, -10_000, { category_id: "c1" }),
+          transaction("m2", `${second}-05`, -20_000, { category_id: "c1" }),
+          transaction("m1", `${first}-05`, -90_000, { category_id: "c1" }),
+          transaction("m0", `${current}-01`, -40_000, { category_id: "c1" }),
+        ],
+      }),
+    });
+    const body = await h.json("spending_trend", { categories: ["Groceries"], months: 4 });
+    // Complete months 10, 20 and 90: the average is 40, the median 20. The current month's 40 waits.
+    assert.equal(seriesOf(body)[0].average, 40);
+    assert.equal(seriesOf(body)[0].median, 20);
+    const withPartial = await h.json("spending_trend", { categories: ["Groceries"], months: 4, include_partial: true });
+    // 10, 20, 40 and 90: the two middle months are 20 and 40.
+    assert.equal(seriesOf(withPartial)[0].median, 30);
   });
 });
 
@@ -319,6 +349,7 @@ describe("spending_trend with buckets", () => {
           { month: "2026-08", spent: 153 },
         ],
         average: 117.5,
+        median: 117.5,
         min: 82,
         max: 153,
       },
@@ -331,6 +362,7 @@ describe("spending_trend with buckets", () => {
           { month: "2026-08", spent: 150 },
         ],
         average: 150,
+        median: 150,
         min: 150,
         max: 150,
       },
@@ -343,6 +375,7 @@ describe("spending_trend with buckets", () => {
         { month: "2026-08", spent: 30 },
       ],
       average: 52.5,
+      median: 52.5,
       min: 30,
       max: 75,
     });
@@ -446,6 +479,7 @@ describe("spending_trend with buckets", () => {
         { month: current, spent: 7, partial: true },
       ],
       average: 0,
+      median: 0,
       min: 0,
       max: 0,
     });
