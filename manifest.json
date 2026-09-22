@@ -70,11 +70,11 @@
     },
     {
       "name": "spending_breakdown",
-      "description": "Spending over a date range grouped by category, category group, payee, account or month, with shares, an `other` remainder and what the rule excluded."
+      "description": "Spending over a date range grouped by category, category group, payee, account, month or your own buckets of categories, with shares, an `other` remainder and what the rule excluded."
     },
     {
       "name": "spending_trend",
-      "description": "Month-by-month spending for named categories or category groups, with average, min and max over the complete months."
+      "description": "Month-by-month spending for named categories, category groups or your own buckets of categories, with average, min and max over the complete months."
     },
     {
       "name": "search_transactions",

@@ -340,3 +340,289 @@ describe("spending_breakdown", () => {
     assert.ok(!text.includes("null"), text);
   });
 });
+
+interface BucketRow {
+  name: string;
+  spent: number;
+  count: number;
+  share: number;
+  groups?: { id: string; name: string }[];
+  categories?: { id: string; name: string }[];
+}
+
+interface Unassigned {
+  spent: number;
+  count: number;
+  share: number;
+  categories: Row[];
+}
+
+const bucketsOf = (body: Record<string, unknown>): BucketRow[] => body.rows as BucketRow[];
+
+describe("spending_breakdown with buckets", () => {
+  it("makes each bucket a row summing the categories it names, directly or through their groups", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", {
+      start: "2026-08",
+      end: "2026-08",
+      buckets: [
+        { name: "Food", categories: ["Groceries", "Dining Out"] },
+        { name: "Home", groups: ["Everyday", "Housing"] },
+      ],
+    });
+    assert.equal(body.group_by, "bucket");
+    // Food is groceries 135,000 and dining 18,000; Home is the rest of Everyday (household 30,000)
+    // and Housing (the 150,000 mortgage), since a category named directly stays where it is named.
+    assert.deepEqual(bucketsOf(body), [
+      {
+        name: "Home",
+        spent: 180,
+        count: 2,
+        share: 54.1,
+        groups: [
+          { id: "g1", name: "Everyday" },
+          { id: "g2", name: "Housing" },
+        ],
+      },
+      {
+        name: "Food",
+        spent: 153,
+        count: 3,
+        share: 45.9,
+        categories: [
+          { id: "c1", name: "Groceries" },
+          { id: "c3", name: "Dining Out" },
+        ],
+      },
+    ]);
+    assert.ok(!("unassigned" in body), "every line landed in a bucket");
+    assert.equal(body.total, 333);
+  });
+
+  it("lists what no bucket claims under unassigned, so the rows and it add up to the total", async () => {
+    await using h = await spending();
+    const { text } = await h.call("spending_breakdown", {
+      start: "2026-07",
+      end: "2026-07",
+      buckets: [{ name: "Food", categories: ["Groceries", "Dining Out"] }],
+    });
+    const body = JSON.parse(text) as Record<string, unknown>;
+    // July's Food: groceries 50,000 net of the refund, dining 32,000.
+    assert.deepEqual(bucketsOf(body).map((r) => [r.name, r.spent, r.count]), [["Food", 82, 4]]);
+    const unassigned = body.unassigned as Unassigned;
+    assert.deepEqual(
+      unassigned.categories.map((r) => [r.name, r.spent]),
+      [
+        ["Mortgage", 150],
+        ["Household", 30],
+        ["Uncategorized", 25],
+        ["Old hobby", 15],
+        ["(deleted category)", 5],
+      ],
+    );
+    assert.equal(unassigned.spent, 225);
+    assert.equal(unassigned.count, 5);
+    assert.equal(unassigned.share, 73.3);
+    assert.equal(82 + unassigned.spent, body.total, "the bucket and unassigned add up to the total");
+    assert.equal(4 + unassigned.count, body.lines, "and so do their line counts");
+    assert.ok(!text.includes("null"), "the Uncategorized and deleted rows leave their ids out rather than null");
+  });
+
+  it("lets a category named directly win over its group named in another bucket", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", {
+      start: "2026-08",
+      end: "2026-08",
+      buckets: [
+        { name: "Everyday rest", groups: ["Everyday"] },
+        { name: "Groceries only", categories: ["Groceries"] },
+      ],
+    });
+    assert.deepEqual(
+      bucketsOf(body).map((r) => [r.name, r.spent]),
+      [
+        ["Groceries only", 135],
+        ["Everyday rest", 48],
+      ],
+    );
+    assert.deepEqual((body.unassigned as Unassigned).categories.map((r) => r.name), ["Mortgage"]);
+  });
+
+  it("reaches a hidden category through its group", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", { start: "2026-07", end: "2026-07", buckets: [{ name: "Everyday", groups: ["Everyday"] }] });
+    // Groceries 50,000 + household 30,000 + dining 32,000 + the hidden hobby 15,000.
+    assert.equal(bucketsOf(body)[0].spent, 127);
+  });
+
+  it("keeps a bucket that spent nothing as a zero row, after the ones that spent", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", {
+      start: "2026-08",
+      end: "2026-08",
+      buckets: [
+        { name: "Hobbies", categories: ["Old hobby"] },
+        { name: "Groceries", categories: ["Groceries"] },
+      ],
+    });
+    assert.deepEqual(
+      bucketsOf(body).map((r) => [r.name, r.spent, r.count, r.share]),
+      [
+        ["Groceries", 135, 2, 40.5],
+        ["Hobbies", 0, 0, 0],
+      ],
+    );
+  });
+
+  it("keeps buckets that spent the same in the order they were given", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", {
+      start: "2026-08",
+      end: "2026-08",
+      buckets: [
+        { name: "Travel", categories: ["Old hobby"] },
+        { name: "Gifts", categories: ["Retired"] },
+      ],
+    });
+    assert.deepEqual(
+      bucketsOf(body).map((r) => [r.name, r.spent]),
+      [
+        ["Travel", 0],
+        ["Gifts", 0],
+      ],
+    );
+  });
+
+  it("sums a bucket and unassigned in milliunits, so cents do not drift", async () => {
+    await using h = await harness({
+      budget: spendingBudget({
+        months: [],
+        subtransactions: [],
+        transactions: [
+          transaction("x1", "2026-07-05", -12_340, { category_id: "c1" }),
+          transaction("x2", "2026-07-06", -5_670, { category_id: "c3" }),
+          transaction("x3", "2026-07-07", -100, { category_id: "c2" }),
+          transaction("x4", "2026-07-08", -200, { category_id: "c8" }),
+        ],
+      }),
+    });
+    const body = await h.json("spending_breakdown", { start: "2026-07", end: "2026-07", buckets: [{ name: "Food", categories: ["Groceries", "Dining Out"] }] });
+    // Added as rendered decimals these would be 18.009999999999998 and 0.30000000000000004.
+    assert.equal(bucketsOf(body)[0].spent, 18.01);
+    assert.equal((body.unassigned as Unassigned).spent, 0.3);
+    assert.equal(body.total, 18.31);
+  });
+
+  it("tells buckets apart by the emoji in their names", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", {
+      start: "2026-08",
+      end: "2026-08",
+      buckets: [
+        { name: "🍔 Food", categories: ["Dining Out"] },
+        { name: "🛒 Food", categories: ["Groceries"] },
+        { name: "🏠", groups: ["Housing"] },
+      ],
+    });
+    assert.deepEqual(
+      bucketsOf(body).map((r) => r.name),
+      ["🏠", "🛒 Food", "🍔 Food"],
+    );
+  });
+
+  it("buckets only the lines the filters keep", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", {
+      start: "2026-08",
+      end: "2026-08",
+      accounts: ["Visa"],
+      buckets: [{ name: "Food", groups: ["Everyday"] }],
+    });
+    assert.deepEqual(bucketsOf(body).map((r) => [r.name, r.spent, r.count]), [["Food", 45, 1]]);
+    assert.equal(body.total, 45);
+    assert.ok(!("unassigned" in body));
+  });
+
+  it("accepts a bucket naming the same category twice, or a category and its own group", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", {
+      start: "2026-08",
+      end: "2026-08",
+      buckets: [{ name: "Everyday", categories: ["Groceries", "c1"], groups: ["Everyday"] }],
+    });
+    assert.equal(bucketsOf(body)[0].spent, 183);
+  });
+
+  it("returns every bucket whatever the limit", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", {
+      start: "2026-08",
+      end: "2026-08",
+      limit: 1,
+      buckets: [
+        { name: "Food", categories: ["Groceries"] },
+        { name: "Home", categories: ["Household"] },
+        { name: "Housing", groups: ["Housing"] },
+      ],
+    });
+    assert.equal(bucketsOf(body).length, 3);
+    assert.ok(!("other" in body));
+  });
+
+  it("treats an empty list as no buckets at all", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", { start: "2026-08", end: "2026-08", buckets: [] });
+    assert.equal(body.group_by, "category");
+    assert.equal(rowsOf(body)[0].name, "Mortgage");
+  });
+});
+
+describe("spending_breakdown refusing buckets it cannot honour", () => {
+  const refusal = async (args: Record<string, unknown>): Promise<string> => {
+    await using h = await spending();
+    const { text, isError } = await h.call("spending_breakdown", { start: "2026-08", end: "2026-08", ...args });
+    assert.equal(isError, true, text);
+    return text;
+  };
+
+  it("refuses a category named by two buckets, naming both", async () => {
+    const text = await refusal({ buckets: [{ name: "A", categories: ["Groceries"] }, { name: "B", categories: ["c1"] }] });
+    assert.equal(text, 'The category Groceries (c1) is in both "A" and "B"; name it in one bucket only.');
+  });
+
+  it("refuses a group named by two buckets", async () => {
+    const text = await refusal({ buckets: [{ name: "A", groups: ["Everyday"] }, { name: "B", groups: ["every"] }] });
+    assert.match(text, /category group Everyday \(g1\) is in both "A" and "B"/);
+  });
+
+  it("refuses a bucket that names nothing", async () => {
+    const text = await refusal({ buckets: [{ name: "Food", categories: ["Groceries"] }, { name: "Misc" }] });
+    assert.equal(text, 'Bucket "Misc" names no categories or groups.');
+  });
+
+  it("refuses two buckets with the same name, whatever their case", async () => {
+    const text = await refusal({ buckets: [{ name: "Food", categories: ["Groceries"] }, { name: " food ", categories: ["Dining Out"] }] });
+    assert.match(text, /Two buckets are called "Food"/);
+  });
+
+  it("refuses a bucket with no name", async () => {
+    const text = await refusal({ buckets: [{ name: "  ", categories: ["Groceries"] }] });
+    assert.match(text, /needs a name/);
+  });
+
+  it("refuses YNAB's own Uncategorized category, whose spending always goes to unassigned", async () => {
+    const text = await refusal({ buckets: [{ name: "Misc", categories: ["Uncategorized"] }] });
+    assert.match(text, /In bucket "Misc": Uncategorized \(c7\) is YNAB's own category/);
+    assert.match(text, /`unassigned`/);
+  });
+
+  it("names the bucket whose name it could not resolve", async () => {
+    const text = await refusal({ buckets: [{ name: "Food", categories: ["Grocerys"] }] });
+    assert.equal(text, 'In bucket "Food": No category named "Grocerys".');
+  });
+
+  it("refuses buckets alongside group_by, since each is a grouping", async () => {
+    const text = await refusal({ group_by: "payee", buckets: [{ name: "Food", categories: ["Groceries"] }] });
+    assert.match(text, /leave out `group_by`/);
+  });
+});

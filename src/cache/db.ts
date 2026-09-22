@@ -131,8 +131,8 @@ export interface SearchFilter extends SpendingFilter {
 /** One bucket of spending. `spent` is the raw milliunit sum, so ordinary spending is negative. */
 /** One entity's spending in one month, from `spendingByMonth`. */
 export interface MonthlySpending {
-  /** The category or category group id. */
-  key: string;
+  /** The category or category group id; null for a line with none (Uncategorized, a deleted category). */
+  key: string | null;
   /** `YYYY-MM`. */
   month: string;
   /** Milliunits, negative for spending. */
@@ -854,8 +854,8 @@ export class BudgetDb {
   /**
    * The spending lines in range summed per month per category (or per category group), so a trend
    * over several series is one pass over the lines rather than one per series. A line whose
-   * entity is missing — no category, a deleted one, a group that is gone — has no series to land
-   * in and is left out; the filter is what names the entities the caller wants.
+   * entity is missing — no category, a deleted one, a group that is gone — comes back under a null
+   * key, so an unfiltered call still adds up to all spending; a filter by id never reaches one.
    */
   spendingByMonth(budgetId: string, splitBy: "category" | "category_group", filter: SpendingFilter = {}): MonthlySpending[] {
     const { where, params } = spendingWhere(budgetId, filter);
@@ -864,12 +864,12 @@ export class BudgetDb {
       WITH lines AS (${LINES_CTE})
       SELECT ${key} AS key, SUBSTR(l.date, 1, 7) AS month, SUM(l.amount) AS spent
       ${SPENDING_FROM}
-      WHERE ${[SPENDING_RULE, `${key} IS NOT NULL`, ...where].join(" AND ")}
+      WHERE ${[SPENDING_RULE, ...where].join(" AND ")}
       GROUP BY ${key}, month
       ORDER BY ${key}, month`;
     return this.stmt(sql)
       .all(params)
-      .map((r) => ({ key: r.key as string, month: r.month as string, spent: Number(r.spent) }));
+      .map((r) => ({ key: (r.key as string | null) ?? null, month: r.month as string, spent: Number(r.spent) }));
   }
 
   /** The line count and milliunit sum of every spending line the filter selects. */
@@ -1092,6 +1092,21 @@ export class BudgetDb {
       flagColor: (r.flag_color as string | null) ?? null,
       lines: byParent.get(r.id as string) ?? [],
     }));
+  }
+
+  /**
+   * Every category's group id, hidden and internal categories included: what naming a group
+   * expands to when a report groups categories its own way.
+   */
+  categoryGroupIds(budgetId: string): Map<string, string> {
+    const rows = this.stmt(`SELECT id, category_group_id FROM categories WHERE budget_id = ?`).all(budgetId);
+    return new Map(rows.map((r) => [r.id as string, r.category_group_id as string]));
+  }
+
+  /** The ids of YNAB's own categories (`Inflow: Ready to Assign`, `Uncategorized`), which the spending rule never counts. */
+  internalCategoryIds(budgetId: string): Set<string> {
+    const rows = this.stmt(`SELECT id FROM categories WHERE budget_id = ? AND internal = 1`).all(budgetId);
+    return new Set(rows.map((r) => r.id as string));
   }
 
   /** The date of the earliest cached transaction, or null for an empty budget: the register's lower edge. */

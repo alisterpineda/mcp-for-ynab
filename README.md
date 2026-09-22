@@ -85,7 +85,12 @@ in order and its income sources by amount, `spending_breakdown` sorts its rows b
   `groups`, `payees` and `accounts` filters take ids or names — a whole name first, else a part that
   only one entity contains — and the response echoes what each resolved to under `filters`. The
   response states its `scope` — the spending rule it applied — and counts what that rule dropped
-  under `excluded`.
+  under `excluded`. `buckets` groups the categories your own way instead of `group_by`: each
+  bucket is a name plus the `categories` and `groups` it gathers, by id or name. A category named
+  directly stays in its bucket even when another bucket names its group, a category or group
+  claimed by two buckets is an error, and whatever no bucket claims (Uncategorized included) is
+  listed category by category under `unassigned`, so the rows and `unassigned` add up to the
+  total. The buckets travel with every call; the server stores none of them.
 - `spending_trend` — whether it is creeping up: a month-by-month series of spending for the
   `categories` and `groups` you name (ids or names, whole or a unique part), one series each in the order asked,
   a group series summing its categories. The window is the last six months ending at the current
@@ -93,6 +98,9 @@ in order and its income sources by amount, `spending_breakdown` sorts its rows b
   before the budget's history is cut at its first month and says so under `history_starts`. Months
   with no activity read as zero, and each series carries `average`, `min` and `max` over the complete
   months — the current month is flagged `partial` and left out unless `include_partial` is set.
+  `buckets` works as it does for `spending_breakdown`: each bucket becomes a series after the ones
+  named, and what no bucket claims becomes an `unassigned` series, so the bucket series and
+  `unassigned` add up to each month's spending.
 - `search_transactions` — the lines behind a number: transactions filtered by date, `categories`,
   `groups`, `payees`, `accounts`, an absolute amount range (`min_amount`/`max_amount` in currency
   units), `direction` and `text` (part of a memo, a payee name or the payee as the bank sent it,

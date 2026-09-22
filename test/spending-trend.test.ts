@@ -247,6 +247,8 @@ describe("spending_trend when it cannot answer", () => {
     await using h = await spending();
     const { isError } = await h.call("spending_trend", { categories: [], groups: [] });
     assert.equal(isError, true);
+    const onlyBuckets = await h.call("spending_trend", { buckets: [] });
+    assert.equal(onlyBuckets.isError, true, "an empty bucket list asks for no series either");
   });
 
   it("names the input it could not resolve", async () => {
@@ -283,5 +285,181 @@ describe("spending_trend refresh", () => {
     assert.equal(h.source.calls.length, before + 1);
     await h.json("spending_trend", { categories: ["Groceries"] });
     assert.equal(h.source.calls.length, before + 1, "without refresh the cache is still fresh");
+  });
+});
+
+interface BucketSeries extends Omit<Series, "id" | "kind"> {
+  kind: "bucket";
+  groups?: { id: string; name: string }[];
+  categories?: { id: string; name: string }[];
+}
+
+describe("spending_trend with buckets", () => {
+  it("gives each bucket a series summing its categories, and unassigned the rest", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_trend", {
+      start: "2026-07",
+      end: "2026-08",
+      buckets: [
+        { name: "Food", categories: ["Groceries", "Dining Out"] },
+        { name: "Home", groups: ["Housing"] },
+      ],
+    });
+    assert.deepEqual(body.series, [
+      {
+        name: "Food",
+        kind: "bucket",
+        categories: [
+          { id: "c1", name: "Groceries" },
+          { id: "c3", name: "Dining Out" },
+        ],
+        // July: groceries 50,000 net of the refund and dining 32,000. August: 135,000 and 18,000.
+        months: [
+          { month: "2026-07", spent: 82 },
+          { month: "2026-08", spent: 153 },
+        ],
+        average: 117.5,
+        min: 82,
+        max: 153,
+      },
+      {
+        name: "Home",
+        kind: "bucket",
+        groups: [{ id: "g2", name: "Housing" }],
+        months: [
+          { month: "2026-07", spent: 150 },
+          { month: "2026-08", spent: 150 },
+        ],
+        average: 150,
+        min: 150,
+        max: 150,
+      },
+    ]);
+    // July: household 30,000, the hidden hobby 15,000, the uncategorized 25,000 and the deleted
+    // category's 5,000. August: household 30,000.
+    assert.deepEqual(body.unassigned, {
+      months: [
+        { month: "2026-07", spent: 75 },
+        { month: "2026-08", spent: 30 },
+      ],
+      average: 52.5,
+      min: 30,
+      max: 75,
+    });
+  });
+
+  it("adds up, bucket series and unassigned together, to each month's spending", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_trend", {
+      start: "2026-07",
+      end: "2026-09",
+      buckets: [
+        { name: "Groceries", categories: ["Groceries"] },
+        { name: "Everyday rest", groups: ["Everyday"] },
+      ],
+    });
+    const monthTotals = await h.json("spending_breakdown", { start: "2026-07", end: "2026-09", group_by: "month" });
+    const unassigned = (body.unassigned as { months: Point[] }).months;
+    for (const [i, row] of (monthTotals.rows as { name: string; spent: number }[]).entries()) {
+      const buckets = (body.series as BucketSeries[]).reduce((sum, series) => sum + series.months[i].spent, 0);
+      assert.equal(buckets + unassigned[i].spent, row.spent, `${row.name}: buckets and unassigned vs the month's spending`);
+    }
+  });
+
+  it("puts bucket series after the category and group series asked for", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_trend", {
+      start: "2026-07",
+      end: "2026-08",
+      categories: ["Groceries"],
+      buckets: [{ name: "Everyday", groups: ["Everyday"] }],
+    });
+    assert.deepEqual(
+      (body.series as { name: string; kind: string }[]).map((s) => [s.name, s.kind]),
+      [
+        ["Groceries", "category"],
+        ["Everyday", "bucket"],
+      ],
+    );
+    // The bucket still reads all spending, not only the categories trended beside it: Everyday is
+    // groceries, household, dining and the hidden hobby (127,000 in July, 183,000 in August), and
+    // unassigned keeps the mortgage, the uncategorized and the deleted category's lines.
+    assert.deepEqual((body.series as BucketSeries[])[1].months, [
+      { month: "2026-07", spent: 127 },
+      { month: "2026-08", spent: 183 },
+    ]);
+    assert.deepEqual((body.unassigned as { months: Point[] }).months, [
+      { month: "2026-07", spent: 180 },
+      { month: "2026-08", spent: 150 },
+    ]);
+  });
+
+  it("sums a bucket's month in milliunits, so cents do not drift", async () => {
+    await using h = await harness({
+      budget: spendingBudget({
+        months: [],
+        subtransactions: [],
+        transactions: [
+          transaction("x1", "2026-07-05", -12_340, { category_id: "c1" }),
+          transaction("x2", "2026-07-06", -5_670, { category_id: "c3" }),
+          transaction("x3", "2026-07-07", -100, { category_id: "c2" }),
+          transaction("x4", "2026-07-08", -200, { category_id: "c8" }),
+        ],
+      }),
+    });
+    const body = await h.json("spending_trend", { start: "2026-07", end: "2026-07", buckets: [{ name: "Food", categories: ["Groceries", "Dining Out"] }] });
+    // Added as rendered decimals these would be 18.009999999999998 and 0.30000000000000004.
+    assert.equal((body.series as BucketSeries[])[0].months[0].spent, 18.01);
+    assert.equal((body.unassigned as { months: Point[] }).months[0].spent, 0.3);
+  });
+
+  it("leaves unassigned out when the buckets claim every line", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_trend", { start: "2026-08", end: "2026-08", buckets: [{ name: "All", groups: ["Everyday", "Housing"] }] });
+    assert.equal((body.series as BucketSeries[])[0].average, 333);
+    assert.ok(!("unassigned" in body));
+  });
+
+  it("flags the partial month in bucket and unassigned series alike", async () => {
+    const [previous, current] = [monthFromNow(-1), monthFromNow(0)];
+    await using h = await harness({
+      budget: spendingBudget({
+        first_month: `${previous}-01`,
+        months: [],
+        subtransactions: [],
+        transactions: [
+          transaction("x1", `${previous}-05`, -20_000, { category_id: "c1" }),
+          transaction("x2", `${current}-01`, -5_000, { category_id: "c1" }),
+          transaction("x3", `${current}-01`, -7_000, { category_id: "c2" }),
+        ],
+      }),
+    });
+    const body = await h.json("spending_trend", { months: 2, buckets: [{ name: "Food", categories: ["Groceries"] }] });
+    assert.deepEqual((body.series as BucketSeries[])[0].months, [
+      { month: previous, spent: 20 },
+      { month: current, spent: 5, partial: true },
+    ]);
+    assert.equal((body.series as BucketSeries[])[0].average, 20, "the partial month stays out of the statistics");
+    assert.deepEqual(body.unassigned, {
+      months: [
+        { month: previous, spent: 0 },
+        { month: current, spent: 7, partial: true },
+      ],
+      average: 0,
+      min: 0,
+      max: 0,
+    });
+  });
+
+  it("refuses buckets it cannot honour with the same errors as spending_breakdown", async () => {
+    await using h = await spending();
+    const { text, isError } = await h.call("spending_trend", {
+      buckets: [
+        { name: "A", categories: ["Groceries"] },
+        { name: "B", categories: ["Groceries"] },
+      ],
+    });
+    assert.equal(isError, true);
+    assert.equal(text, 'The category Groceries (c1) is in both "A" and "B"; name it in one bucket only.');
   });
 });
