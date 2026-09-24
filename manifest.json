@@ -1,16 +1,16 @@
 {
   "manifest_version": "0.3",
-  "name": "ynab-mcp",
-  "display_name": "YNAB",
+  "name": "mcp-for-ynab",
+  "display_name": "MCP for YNAB",
   "version": "0.2.0",
-  "description": "MCP server for YNAB (You Need A Budget).",
+  "description": "An unofficial MCP server for YNAB (You Need A Budget). Not affiliated with YNAB.",
   "license": "MIT",
   "author": {
     "name": "Alister Pineda"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/alisterpineda/ynab-mcp"
+    "url": "https://github.com/alisterpineda/mcp-for-ynab"
   },
   "server": {
     "type": "node",

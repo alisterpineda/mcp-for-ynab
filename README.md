@@ -1,6 +1,6 @@
-# ynab-mcp
+# MCP for YNAB
 
-MCP server for YNAB, packaged as a Claude Desktop extension.
+An unofficial MCP server for YNAB, packaged as a Claude Desktop extension.
 
 - Install: `npm install`
 - Build: `npm run build`
@@ -14,7 +14,10 @@ MCP server for YNAB, packaged as a Claude Desktop extension.
 | --- | --- | --- |
 | `YNAB_ACCESS_TOKEN` | yes | Personal access token from https://app.ynab.com/settings/developer |
 | `YNAB_BUDGET_ID` | no | Budget to sync. Defaults to YNAB's default (last-used) budget. |
-| `YNAB_MCP_CACHE_DIR` | no | Where `ynab.sqlite` lives. Defaults to `~/Library/Application Support/ynab-mcp` on macOS. |
+| `MCP_FOR_YNAB_CACHE_DIR` | no | Where `ynab.sqlite` lives. Defaults to `~/Library/Application Support/alisterpineda/mcp-for-ynab` on macOS. |
+
+Create your own personal access token for your own YNAB account. It stays on your machine, in the
+extension's settings or your environment, and is sent only to YNAB's API.
 
 ## How data flows
 
@@ -149,3 +152,10 @@ and its income plus spending is what the on-budget accounts grew by, and every r
 back to its own id. Copy `.env.example` to `.env`
 and fill in your token; `npm test` loads it automatically. `.env` is git-ignored. Set
 `YNAB_BUDGET_ID` as well to test a budget other than your default one.
+
+## Disclaimer
+
+We are not affiliated, associated, or in any way officially connected with YNAB or any of its
+subsidiaries or affiliates. The official YNAB website can be found at https://www.ynab.com. The
+names YNAB and You Need A Budget, as well as related names, tradenames, marks, trademarks,
+emblems, and images are registered trademarks of YNAB.

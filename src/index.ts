@@ -6,16 +6,16 @@ import { BudgetDb } from "./cache/db.js";
 import { registerTools } from "./tools/index.js";
 import { YnabClient } from "./ynab/client.js";
 
+const { name, version } = pkg;
+
 // stdout carries the MCP protocol; all logging goes to stderr.
-const log = (message: string): void => console.error(`[ynab-mcp] ${message}`);
+const log = (message: string): void => console.error(`[${name}] ${message}`);
 
 const token = process.env.YNAB_ACCESS_TOKEN;
 if (!token) {
   log("YNAB_ACCESS_TOKEN is not set. Configure it in the extension settings and restart.");
   process.exit(1);
 }
-
-const version: string = pkg.version;
 
 const db = new BudgetDb();
 if (db.discardedCorruptFile) log(`discarded an unreadable cache file at ${db.path}; the next sync pulls the full budget`);
@@ -28,7 +28,7 @@ const store = new BudgetStore({
   log,
 });
 
-const server = new McpServer({ name: "ynab-mcp", version });
+const server = new McpServer({ name, version });
 registerTools(server, store);
 
 await server.connect(new StdioServerTransport());

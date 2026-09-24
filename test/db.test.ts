@@ -549,7 +549,7 @@ describe("schemaFingerprint", () => {
 
 describe("BudgetDb on disk", () => {
   it("persists across reopen and rebuilds when the file does not carry this build's schema", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "ynab-mcp-db-"));
+    const dir = await mkdtemp(path.join(tmpdir(), "mcp-for-ynab-db-"));
     const file = path.join(dir, "nested", "ynab.sqlite");
     try {
       const db = new BudgetDb(file);
@@ -582,7 +582,7 @@ describe("BudgetDb on disk", () => {
   });
 
   it("keeps the file owner-only", { skip: process.platform === "win32" }, async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "ynab-mcp-db-"));
+    const dir = await mkdtemp(path.join(tmpdir(), "mcp-for-ynab-db-"));
     const file = path.join(dir, "ynab.sqlite");
     try {
       const db = new BudgetDb(file);
@@ -596,7 +596,7 @@ describe("BudgetDb on disk", () => {
   });
 
   it("discards a file that is not a database instead of failing to open", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "ynab-mcp-db-"));
+    const dir = await mkdtemp(path.join(tmpdir(), "mcp-for-ynab-db-"));
     const file = path.join(dir, "ynab.sqlite");
     try {
       await writeFile(file, "this is not a SQLite file; a half-written or foreign cache must not wedge startup");

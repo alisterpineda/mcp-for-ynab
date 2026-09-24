@@ -28,7 +28,7 @@ export async function harness(options: { budget?: BudgetDetail; ttlMs?: number }
   const db = new BudgetDb(":memory:");
   const store = new BudgetStore({ client: source, db, configuredBudgetId: null, ttlMs: options.ttlMs ?? 60_000 });
 
-  const server = new McpServer({ name: "ynab-mcp", version: "test" });
+  const server = new McpServer({ name: "mcp-for-ynab", version: "test" });
   registerTools(server, store);
   const client = new Client({ name: "test", version: "test" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
