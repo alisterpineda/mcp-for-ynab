@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import pkg from "../package.json" with { type: "json" };
@@ -13,7 +14,7 @@ const log = (message: string): void => console.error(`[${name}] ${message}`);
 
 const token = process.env.YNAB_ACCESS_TOKEN;
 if (!token) {
-  log("YNAB_ACCESS_TOKEN is not set. Configure it in the extension settings and restart.");
+  log("YNAB_ACCESS_TOKEN is not set. Set it in the extension settings or your MCP client's env, then restart.");
   process.exit(1);
 }
 

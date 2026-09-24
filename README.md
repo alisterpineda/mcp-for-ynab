@@ -1,12 +1,56 @@
 # MCP for YNAB
 
-An unofficial MCP server for YNAB, packaged as a Claude Desktop extension.
+An unofficial MCP server for YNAB: read-only spending, cash flow and budget analysis from a local
+cache of your budget.
+
+## Install
+
+Create your own personal access token for your own YNAB account at
+https://app.ynab.com/settings/developer. It stays on your machine, in the extension's settings or
+your MCP client's config, and is sent only to YNAB's API. Node 22.13 or later is needed for the
+npm install.
+
+**Claude Desktop:** download `mcp-for-ynab.mcpb` from the
+[latest release](https://github.com/alisterpineda/mcp-for-ynab/releases/latest), open it, and
+paste your token when asked.
+
+**Claude Code:**
+
+```sh
+claude mcp add --transport stdio --env YNAB_ACCESS_TOKEN=<your-token> ynab -- npx -y mcp-for-ynab
+```
+
+**Other MCP clients:**
+
+```json
+{
+  "mcpServers": {
+    "ynab": {
+      "command": "npx",
+      "args": ["-y", "mcp-for-ynab"],
+      "env": { "YNAB_ACCESS_TOKEN": "<your-token>" }
+    }
+  }
+}
+```
+
+## Development
 
 - Install: `npm install`
 - Build: `npm run build`
 - Inspect: `npm run inspect`
 - Test: `npm test`
 - Pack: `npm run pack`
+
+To release, set the same new version in `package.json` and `manifest.json`, commit, then tag and
+push it (`git tag v0.3.0 && git push origin v0.3.0`). The release workflow tests the tag, publishes
+the package to npm and creates a GitHub release with the `.mcpb` attached. Re-running it after a
+failed GitHub release step is safe: it skips a version npm already has.
+
+The workflow publishes through npm trusted publishing, and npm lets you configure a trusted
+publisher only on a package that already exists. So publish the first version by hand
+(`npm publish`), add this repository's `release.yml` as the trusted publisher on npmjs.com, then
+push that version's tag to create its GitHub release.
 
 ## Configuration
 
@@ -15,9 +59,6 @@ An unofficial MCP server for YNAB, packaged as a Claude Desktop extension.
 | `YNAB_ACCESS_TOKEN` | yes | Personal access token from https://app.ynab.com/settings/developer |
 | `YNAB_BUDGET_ID` | no | Budget to sync. Defaults to YNAB's default (last-used) budget. |
 | `MCP_FOR_YNAB_CACHE_DIR` | no | Where `ynab.sqlite` lives. Defaults to `~/Library/Application Support/alisterpineda/mcp-for-ynab` on macOS. |
-
-Create your own personal access token for your own YNAB account. It stays on your machine, in the
-extension's settings or your environment, and is sent only to YNAB's API.
 
 ## How data flows
 

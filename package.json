@@ -1,10 +1,31 @@
 {
   "name": "mcp-for-ynab",
   "version": "0.2.0",
-  "description": "MCP server for YNAB, packaged as a Claude Desktop extension",
-  "private": true,
+  "description": "Unofficial MCP server for YNAB: read-only spending, cash flow and budget analysis from a local cache",
   "license": "MIT",
+  "author": "Alister Pineda",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alisterpineda/mcp-for-ynab.git"
+  },
+  "homepage": "https://github.com/alisterpineda/mcp-for-ynab#readme",
+  "bugs": {
+    "url": "https://github.com/alisterpineda/mcp-for-ynab/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ynab",
+    "budget",
+    "claude"
+  ],
   "type": "module",
+  "bin": {
+    "mcp-for-ynab": "server/index.js"
+  },
+  "files": [
+    "server"
+  ],
   "engines": {
     "node": ">=22.13.0"
   },
@@ -13,18 +34,19 @@
     "typecheck": "tsc --noEmit",
     "inspect": "npm run build && npx @modelcontextprotocol/inspector node server/index.js",
     "pack": "npm run build && mcpb pack . mcp-for-ynab.mcpb",
-    "test": "node --env-file-if-exists=.env --import tsx --test \"test/**/*.test.ts\""
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "ynab": "^4.5.0",
-    "zod": "^3.25.76"
+    "test": "node --env-file-if-exists=.env --import tsx --test \"test/**/*.test.ts\"",
+    "smoke": "node --import tsx --test test/published-bin.smoke.ts",
+    "check": "npm run typecheck && npm test && npm run build && npm run smoke",
+    "prepublishOnly": "npm run check"
   },
   "devDependencies": {
     "@anthropic-ai/mcpb": "^2.1.2",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@types/node": "^22.13.0",
     "esbuild": "^0.28.2",
     "tsx": "^4.23.15",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "ynab": "^4.5.0",
+    "zod": "^3.25.76"
   }
 }

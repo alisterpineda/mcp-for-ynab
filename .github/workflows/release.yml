@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub release
+      id-token: write # npm trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - name: Check the tag matches the package version
+        run: test "$GITHUB_REF_NAME" = "v$(node -p 'require("./package.json").version')"
+      - run: npm run pack
+      # Fail here, before the irreversible npm publish, if the pack script's output name has changed.
+      - run: test -f mcp-for-ynab.mcpb
+      # prepublishOnly runs `npm run check` before anything is uploaded. npm refuses to republish a
+      # version, so skip a version that is already there (a re-run, or a hand-published version).
+      - name: Publish to npm
+        run: |
+          spec="$(node -p 'const p = require("./package.json"); p.name + "@" + p.version')"
+          # npm view prints nothing (exit 0) for a missing version and fails for a missing package.
+          if [ -n "$(npm view "$spec" version 2>/dev/null)" ]; then
+            echo "This version is already on npm; skipping npm publish."
+          else
+            npm publish
+          fi
+      - run: gh release create "$GITHUB_REF_NAME" mcp-for-ynab.mcpb --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}

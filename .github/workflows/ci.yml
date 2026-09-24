@@ -18,6 +18,5 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
+      # typecheck, test, build, then smoke-test the built bin; prepublishOnly runs the same script.
+      - run: npm run check
