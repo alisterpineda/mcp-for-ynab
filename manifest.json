@@ -70,11 +70,11 @@
     },
     {
       "name": "spending_breakdown",
-      "description": "Spending over a date range grouped by category, category group, payee, account, month or your own buckets of categories, with shares, months active, an `other` remainder and what the rule excluded."
+      "description": "Spending over a date range grouped by category, category group, payee, account, month or your own buckets of categories, with shares, months active, each row's average, median, lowest and highest month, an `other` remainder and what the rule excluded."
     },
     {
       "name": "spending_trend",
-      "description": "Month-by-month spending for named categories, category groups or your own buckets of categories, with average, median, min and max over the complete months."
+      "description": "Month-by-month spending for named categories, category groups, payees or your own buckets of categories, with average, median, min and max over the complete months."
     },
     {
       "name": "search_transactions",
@@ -86,7 +86,7 @@
     },
     {
       "name": "budget_vs_actual",
-      "description": "Assigned against activity per category over a window of months, with available, overspent-month and over-assigned-month counts, from YNAB's own per-month figures."
+      "description": "Assigned against activity per category over a window of months, with available, overspent, over- and under-assigned month counts, what was left unspent, the goal, and a sort by overspent, unspent or spent."
     },
     {
       "name": "sync_status",

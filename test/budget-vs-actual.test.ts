@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { month, monthCategory, monthFromNow, spendingBudget } from "./fixtures.js";
+import { category, goal, month, monthCategory, monthFromNow, spendingBudget } from "./fixtures.js";
 import { harness } from "./mcp.js";
 
 interface MonthPoint {
@@ -21,6 +21,10 @@ interface Row {
   overspent_months: number;
   overspent?: number;
   over_assigned_months: number;
+  over_assigned?: number;
+  under_assigned_months: number;
+  unspent?: number;
+  goal?: Record<string, unknown>;
   hidden?: true;
   credit_card_payment?: true;
   months?: MonthPoint[];
@@ -70,7 +74,82 @@ describe("budget_vs_actual", () => {
       overspent_months: 1,
       overspent: 55,
       over_assigned_months: 2,
+      // Spending ran 10 then 75 past the assignments: 85 more spent than assigned over the window.
+      over_assigned: 85,
+      under_assigned_months: 0,
     });
+  });
+
+  it("counts the months a category was assigned more than it spent, and what that left unspent", async () => {
+    await using h = await spending();
+    const rows = rowsOf(await h.json("budget_vs_actual", PAST));
+    // Dining Out: assigned 40 and spent 32, then assigned 20 and spent 18: 10 unspent over two months.
+    const dining = rows.find((row) => row.name === "Dining Out")!;
+    assert.equal(dining.under_assigned_months, 2);
+    assert.equal(dining.unspent, 10);
+    assert.ok(!("over_assigned" in dining), "exactly one of the two amounts, or neither");
+    // Household spent exactly what it was assigned both months: neither over nor under.
+    const household = rows.find((row) => row.name === "Household")!;
+    assert.equal(household.over_assigned_months, 0);
+    assert.equal(household.under_assigned_months, 0);
+    assert.ok(!("unspent" in household));
+    assert.ok(!("over_assigned" in household));
+  });
+
+  it("nets a month over against a month under, so a padded category reads as padded", async () => {
+    const budget = spendingBudget({
+      months: [
+        month("2026-06-01", [monthCategory("c1", { budgeted: 100_000, activity: -120_000, balance: -20_000 })]),
+        month("2026-07-01", [monthCategory("c1", { budgeted: 100_000, activity: -50_000, balance: 30_000 })]),
+      ],
+      transactions: [],
+      subtransactions: [],
+    });
+    await using h = await harness({ budget });
+    const [row] = rowsOf(await h.json("budget_vs_actual", { start: "2026-06", end: "2026-07" }));
+    assert.equal(row.over_assigned_months, 1);
+    assert.equal(row.under_assigned_months, 1);
+    assert.equal(row.unspent, 30, "20 over in June, 50 under in July");
+  });
+
+  it("carries the category's goal, so a target can be read against what was actually spent", async () => {
+    const budget = spendingBudget({
+      categories: [
+        category("c1", "Groceries"),
+        category("c2", "Household"),
+        category("c3", "Dining Out", goal("NEED", 40_000, { goal_cadence: 1, goal_cadence_frequency: 1 })),
+        category("c4", "Mortgage", { category_group_id: "g2" }),
+        category("c5", "Visa", { category_group_id: "g3" }),
+        category("c6", "Inflow: Ready to Assign", { category_group_id: "g4", internal: true }),
+        category("c7", "Uncategorized", { category_group_id: "g4", internal: true }),
+        category("c8", "Old hobby", { hidden: true }),
+        category("c9", "Retired", { category_group_id: "g5" }),
+      ],
+    });
+    await using h = await harness({ budget });
+    const rows = rowsOf(await h.json("budget_vs_actual", PAST));
+    assert.deepEqual(rows.find((row) => row.name === "Dining Out")!.goal, { type: "plan your spending", target: 40, cadence: "monthly" });
+    assert.ok(!("goal" in rows.find((row) => row.name === "Groceries")!), "no goal, no key");
+  });
+
+  it("sorts by what was left unspent when asked, most padded first", async () => {
+    await using h = await spending();
+    const body = await h.json("budget_vs_actual", { ...PAST, sort: "unspent" });
+    // Visa 62 and Dining Out 10 unspent; Mortgage, Household and the hobby spent exactly their
+    // assignments (most assigned first); the deleted category and Groceries overran theirs.
+    assert.deepEqual(
+      rowsOf(body).map((row) => row.name),
+      ["Visa", "Dining Out", "Mortgage", "Household", "Old hobby", "(deleted category)", "Groceries"],
+    );
+  });
+
+  it("sorts by spending when asked, biggest spender first", async () => {
+    await using h = await spending();
+    const body = await h.json("budget_vs_actual", { ...PAST, sort: "spent" });
+    assert.deepEqual(
+      rowsOf(body).map((row) => row.name),
+      ["Mortgage", "Groceries", "Household", "Dining Out", "Visa", "Old hobby", "(deleted category)"],
+    );
   });
 
   it("puts the most overspent categories first, then the ones that spent the most", async () => {
@@ -136,6 +215,9 @@ describe("budget_vs_actual", () => {
       available: 62,
       overspent_months: 0,
       over_assigned_months: 0,
+      // Assigned 50 both months against 23 and 15 moved in: the surplus is what the payments drew down.
+      under_assigned_months: 2,
+      unspent: 62,
       credit_card_payment: true,
     });
   });
@@ -230,6 +312,8 @@ describe("budget_vs_actual and the month still being lived in", () => {
     assert.equal(row.overspent_months, 1);
     assert.equal(row.overspent, 10, "the finished month's shortfall only");
     assert.equal(row.over_assigned_months, 1);
+    assert.equal(row.over_assigned, 10, "the finished month's overrun only");
+    assert.equal(row.under_assigned_months, 0);
     assert.deepEqual(row.months, [
       { month: monthFromNow(-1), assigned: 40, activity: -50, available: -10 },
       { month: monthFromNow(0), assigned: 60, activity: -70, available: -20, partial: true },
@@ -242,6 +326,7 @@ describe("budget_vs_actual and the month still being lived in", () => {
     assert.equal(row.overspent_months, 2);
     assert.equal(row.overspent, 30);
     assert.equal(row.over_assigned_months, 2);
+    assert.equal(row.over_assigned, 20, "10 past the assignment in each month");
   });
 
   it("says nothing about a partial month when the window has ended", async () => {

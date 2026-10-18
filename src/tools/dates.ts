@@ -54,9 +54,29 @@ export function monthWindow(months?: number, start?: string, end?: string, today
   if (length > MAX_MONTHS) {
     throw new ToolError(`${first} to ${last} is ${length} months, more than one report covers; ask for at most ${MAX_MONTHS}.`);
   }
+  return monthSpan(first, last);
+}
+
+/**
+ * Every `YYYY-MM` from `first` to `last` inclusive, chronologically; empty when `first` is after
+ * `last`. Uncapped: `monthWindow` applies the cap before calling, and a span bounded by the
+ * budget's own history needs none.
+ */
+export function monthSpan(first: string, last: string): string[] {
   const keys: string[] = [];
-  for (let key = first, i = 0; i < length; key = shiftMonth(key, 1), i += 1) keys.push(key);
+  for (let key = first; key <= last; key = shiftMonth(key, 1)) keys.push(key);
   return keys;
+}
+
+/** Today as an ISO day, read locally: the last day anything can have happened on. */
+export function today(now: Date = new Date()): string {
+  return localDate(now);
+}
+
+/** The last day of a `YYYY-MM` month, as an ISO day. */
+export function lastDayOf(month: string): string {
+  const [year, number] = month.split("-").map(Number);
+  return `${month}-${String(daysIn(year, number)).padStart(2, "0")}`;
 }
 
 /**

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { goalCadence, isKnownCadence } from "../src/tools/list-categories.js";
+import { goalCadence, isKnownCadence } from "../src/tools/goals.js";
 import { category, goal, orientationBudget } from "./fixtures.js";
 import { harness } from "./mcp.js";
 

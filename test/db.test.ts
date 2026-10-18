@@ -1111,6 +1111,14 @@ describe("BudgetDb.monthCategoryRange", () => {
       budgeted: 40_000,
       activity: -50_000,
       balance: 20_000,
+      // The goal definition rides along so a report can set the target beside the months.
+      goalType: null,
+      goalTarget: null,
+      goalTargetDate: null,
+      goalSnoozedAt: null,
+      goalCadence: null,
+      goalCadenceFrequency: null,
+      goalNeedsWholeAmount: null,
     });
   });
 

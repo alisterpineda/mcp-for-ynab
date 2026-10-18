@@ -12,7 +12,7 @@ interface Point {
 interface Series {
   id: string;
   name: string;
-  kind: "category" | "category_group";
+  kind: "category" | "category_group" | "payee";
   months: Point[];
   average?: number;
   median?: number;
@@ -121,6 +121,46 @@ describe("spending_trend", () => {
       min: 127,
       max: 183,
     });
+  });
+
+  it("trends a payee, after the categories and groups asked for", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_trend", { payees: ["Costco"], categories: ["Groceries"], start: "2026-07", end: "2026-09" });
+    assert.deepEqual(
+      seriesOf(body).map((s) => [s.id, s.kind]),
+      [
+        ["c1", "category"],
+        ["p1", "payee"],
+      ],
+    );
+    // Costco: July's split, 60,000 groceries + 30,000 household - 10,000 refund; August 90,000; September 80,000.
+    assert.deepEqual(seriesOf(body)[1], {
+      id: "p1",
+      name: "Costco",
+      kind: "payee",
+      months: [
+        { month: "2026-07", spent: 80 },
+        { month: "2026-08", spent: 90 },
+        { month: "2026-09", spent: 80 },
+      ],
+      average: 83.33,
+      median: 80,
+      min: 80,
+      max: 90,
+    });
+  });
+
+  it("trends a payee by the spending rule, so a transfer payee between budget accounts has nothing to show", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_trend", { payees: ["Transfer : Visa", "Transfer : Mortgage"], start: "2026-07", end: "2026-08" });
+    // Card payments move money between budget accounts; the mortgage transfer is categorized spending.
+    assert.deepEqual(
+      seriesOf(body).map((s) => [s.name, s.months.map((m) => m.spent)]),
+      [
+        ["Transfer : Visa", [0, 0]],
+        ["Transfer : Mortgage", [150, 150]],
+      ],
+    );
   });
 
   it("takes a name whatever its case, and an id just as well", async () => {
@@ -266,16 +306,17 @@ describe("spending_trend and the budget's history", () => {
 });
 
 describe("spending_trend when it cannot answer", () => {
-  it("asks for a category or a group rather than trending the whole budget", async () => {
+  it("asks for a category, group or payee rather than trending the whole budget", async () => {
     await using h = await spending();
     const { text, isError } = await h.call("spending_trend", {});
     assert.equal(isError, true);
     assert.match(text, /categor/i);
+    assert.match(text, /payee/i);
   });
 
   it("treats empty lists as nothing asked for", async () => {
     await using h = await spending();
-    const { isError } = await h.call("spending_trend", { categories: [], groups: [] });
+    const { isError } = await h.call("spending_trend", { categories: [], groups: [], payees: [] });
     assert.equal(isError, true);
     const onlyBuckets = await h.call("spending_trend", { buckets: [] });
     assert.equal(onlyBuckets.isError, true, "an empty bucket list asks for no series either");
@@ -296,6 +337,14 @@ describe("spending_trend when it cannot answer", () => {
     assert.equal(isError, true);
     assert.match(text, /Groceries \(c1\)/);
     assert.match(text, /Groceries \(c10\)/);
+  });
+
+  it("lists the candidates when a name matches several payees", async () => {
+    await using h = await spending();
+    const { text, isError } = await h.call("spending_trend", { payees: ["corner"] });
+    assert.equal(isError, true);
+    assert.match(text, /Corner Diner/);
+    assert.match(text, /Corner Store/);
   });
 
   it("reports an unresolvable group the same way", async () => {

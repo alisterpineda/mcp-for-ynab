@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { BudgetDb, type SyncedBudget } from "../../src/cache/db.js";
 import { BudgetStore } from "../../src/cache/store.js";
-import { isKnownCadence } from "../../src/tools/list-categories.js";
+import { isKnownCadence } from "../../src/tools/goals.js";
 import { FREQUENCIES } from "../../src/tools/list-scheduled.js";
 import { YnabApiError, YnabClient } from "../../src/ynab/client.js";
 
@@ -182,6 +182,24 @@ function assertSpending(db: BudgetDb, budget: SyncedBudget): void {
   for (const row of db.spendingBy(budget.id, "category")) {
     // Uncategorized and deleted categories share the monthly query's null key, so only named ones compare.
     if (row.key !== null) assert.equal(row.months, monthsSeen.get(row.key), `${row.name}: months_active vs the months it appears in`);
+  }
+
+  // Every row of every entity grouping has exactly its own months in the per-month query: summed,
+  // they are the row's spending, so a breakdown's `monthly` figures are over the rows they sit on.
+  // Rows are told apart by id, or by name when there is none (Uncategorized, a deleted category,
+  // no payee), the way the breakdown tells them apart.
+  for (const groupBy of ["category", "category_group", "payee", "account"] as const) {
+    const perRow = new Map<string, number>();
+    for (const row of db.spendingByMonth(budget.id, groupBy)) {
+      const key = row.key ?? `\u0000${row.name}`;
+      perRow.set(key, (perRow.get(key) ?? 0) + row.spent);
+    }
+    for (const row of db.spendingBy(budget.id, groupBy)) {
+      const key = row.key ?? `\u0000${row.name}`;
+      assert.equal(perRow.get(key) ?? 0, row.spent, `${groupBy} ${row.name}: its months vs its total`);
+      perRow.delete(key);
+    }
+    assert.deepEqual([...perRow.keys()], [], `${groupBy}: months under a row the grouping does not report`);
   }
 
   // Every scheduled transaction lands on a cached account with a frequency the tool can rate.

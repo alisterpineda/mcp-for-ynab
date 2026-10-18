@@ -131,13 +131,18 @@ export interface SearchFilter extends SpendingFilter {
 /** One bucket of spending. `spent` is the raw milliunit sum, so ordinary spending is negative. */
 /** One entity's spending in one month, from `spendingByMonth`. */
 export interface MonthlySpending {
-  /** The category or category group id; null for a line with none (Uncategorized, a deleted category). */
+  /** The entity's id; null for a line with none (Uncategorized, a deleted category, no payee). */
   key: string | null;
+  /** The entity's name, as `spendingBy` names the same row, so a null key still tells its rows apart. */
+  name: string;
   /** `YYYY-MM`. */
   month: string;
   /** Milliunits, negative for spending. */
   spent: number;
 }
+
+/** The groupings `spendingByMonth` splits by: every entity grouping, since a month is the split itself. */
+export type SpendingSplitBy = Exclude<SpendingGroupBy, "month">;
 
 export interface SpendingAggregate {
   /**
@@ -236,11 +241,8 @@ export interface MonthCategoryRow {
   goalUnderFunded: number | null;
 }
 
-/** One category as `list_categories` sees it: structure and goal definition, never money. */
-export interface CategoryTreeCategory {
-  id: string;
-  name: string;
-  note: string | null;
+/** A category's goal as YNAB stores it: the definition, never the month's progress against it. */
+export interface GoalFields {
   goalType: string | null;
   goalTarget: number | null;
   goalTargetDate: string | null;
@@ -250,6 +252,13 @@ export interface CategoryTreeCategory {
   goalCadenceFrequency: number | null;
   /** Plan-your-spending goals only: true asks for the whole target each period, false refills up to it. */
   goalNeedsWholeAmount: boolean | null;
+}
+
+/** One category as `list_categories` sees it: structure and goal definition, never money. */
+export interface CategoryTreeCategory extends GoalFields {
+  id: string;
+  name: string;
+  note: string | null;
   /** True when the category is hidden, or sits in a hidden group. */
   hidden: boolean;
 }
@@ -304,7 +313,7 @@ export interface MonthCategoryFilter {
 }
 
 /** One category's figures for one month of a range, with the markers a report has to carry. */
-export interface MonthCategoryRangeRow {
+export interface MonthCategoryRangeRow extends GoalFields {
   /** `YYYY-MM`, the way a monthly report keys its months. */
   month: string;
   categoryId: string;
@@ -855,24 +864,26 @@ export class BudgetDb {
   }
 
   /**
-   * The spending lines in range summed per month per category (or per category group), so a trend
-   * over several series is one pass over the lines rather than one per series. A line whose
-   * entity is missing — no category, a deleted one, a group that is gone — comes back under a null
+   * The spending lines in range summed per month per entity — category, category group, payee or
+   * account — so a trend over several series, or a statistic on every row of a breakdown, is one
+   * pass over the lines rather than one per series. The rows split by the same key and name as
+   * `spendingBy`, so each of its rows has exactly its own months here. A line whose entity is
+   * missing — no category, a deleted one, a group that is gone, no payee — comes back under a null
    * key, so an unfiltered call still adds up to all spending; a filter by id never reaches one.
    */
-  spendingByMonth(budgetId: string, splitBy: "category" | "category_group", filter: SpendingFilter = {}): MonthlySpending[] {
+  spendingByMonth(budgetId: string, splitBy: SpendingSplitBy, filter: SpendingFilter = {}): MonthlySpending[] {
     const { where, params } = spendingWhere(budgetId, filter);
-    const key = splitBy === "category" ? "c.id" : "g.id";
+    const grouping = SPENDING_GROUPINGS[splitBy];
     const sql = `
       WITH lines AS (${LINES_CTE})
-      SELECT ${key} AS key, SUBSTR(l.date, 1, 7) AS month, SUM(l.amount) AS spent
+      SELECT ${grouping.key} AS key, ${grouping.name} AS name, SUBSTR(l.date, 1, 7) AS month, SUM(l.amount) AS spent
       ${SPENDING_FROM}
       WHERE ${[SPENDING_RULE, ...where].join(" AND ")}
-      GROUP BY ${key}, month
-      ORDER BY ${key}, month`;
+      GROUP BY ${grouping.key}, ${grouping.name}, month
+      ORDER BY ${grouping.key}, ${grouping.name}, month`;
     return this.stmt(sql)
       .all(params)
-      .map((r) => ({ key: (r.key as string | null) ?? null, month: r.month as string, spent: Number(r.spent) }));
+      .map((r) => ({ key: (r.key as string | null) ?? null, name: r.name as string, month: r.month as string, spent: Number(r.spent) }));
   }
 
   /** The line count and milliunit sum of every spending line the filter selects. */
@@ -1142,8 +1153,7 @@ export class BudgetDb {
    */
   categoryTree(budgetId: string, options: CategoryTreeOptions = {}): CategoryTreeGroup[] {
     const rows = this.stmt(
-      `SELECT c.id, c.name, c.note, c.goal_type, c.goal_target, c.goal_target_date, c.goal_snoozed_at,
-              c.goal_cadence, c.goal_cadence_frequency, c.goal_needs_whole_amount, c.hidden,
+      `SELECT c.id, c.name, c.note, ${GOAL_COLUMNS}, c.hidden,
               ${GROUP_COLUMNS}
        FROM categories c
        ${GROUP_JOIN}
@@ -1179,13 +1189,7 @@ export class BudgetDb {
         id: r.id as string,
         name,
         note: (r.note as string | null) ?? null,
-        goalType: (r.goal_type as string | null) ?? null,
-        goalTarget: r.goal_target === null ? null : Number(r.goal_target),
-        goalTargetDate: (r.goal_target_date as string | null) ?? null,
-        goalSnoozedAt: (r.goal_snoozed_at as string | null) ?? null,
-        goalCadence: r.goal_cadence === null ? null : Number(r.goal_cadence),
-        goalCadenceFrequency: r.goal_cadence_frequency === null ? null : Number(r.goal_cadence_frequency),
-        goalNeedsWholeAmount: r.goal_needs_whole_amount === null ? null : Number(r.goal_needs_whole_amount) === 1,
+        ...goalFields(r),
         hidden,
       });
     }
@@ -1242,7 +1246,7 @@ export class BudgetDb {
     return this.stmt(
       `SELECT mc.month, mc.category_id, mc.budgeted, mc.activity, mc.balance,
               COALESCE(c.name, '(deleted category)') AS name, COALESCE(c.hidden, 0) AS hidden,
-              ${GROUP_COLUMNS}
+              ${GOAL_COLUMNS}, ${GROUP_COLUMNS}
        FROM month_categories mc
        LEFT JOIN categories c ON c.budget_id = mc.budget_id AND c.id = mc.category_id
        ${GROUP_JOIN}
@@ -1264,6 +1268,7 @@ export class BudgetDb {
           budgeted: Number(r.budgeted),
           activity: Number(r.activity),
           balance: Number(r.balance),
+          ...goalFields(r),
         };
       });
   }
@@ -1835,6 +1840,23 @@ const CREDIT_CARD_PAYMENTS = "Credit Card Payments";
 const GROUP_COLUMNS = `COALESCE(g.name, c.category_group_name, '(unknown group)') AS group_name,
               COALESCE(g.hidden, 0) AS group_hidden`;
 const GROUP_JOIN = `LEFT JOIN category_groups g ON g.budget_id = c.budget_id AND g.id = c.category_group_id`;
+
+/** The goal columns a category row carries, selected under their own names for `goalFields`. */
+const GOAL_COLUMNS = `c.goal_type, c.goal_target, c.goal_target_date, c.goal_snoozed_at,
+              c.goal_cadence, c.goal_cadence_frequency, c.goal_needs_whole_amount`;
+
+/** A row's `GOAL_COLUMNS` read into `GoalFields`; a category that is gone has every one null. */
+function goalFields(r: Record<string, unknown>): GoalFields {
+  return {
+    goalType: (r.goal_type as string | null) ?? null,
+    goalTarget: r.goal_target === null || r.goal_target === undefined ? null : Number(r.goal_target),
+    goalTargetDate: (r.goal_target_date as string | null) ?? null,
+    goalSnoozedAt: (r.goal_snoozed_at as string | null) ?? null,
+    goalCadence: r.goal_cadence === null || r.goal_cadence === undefined ? null : Number(r.goal_cadence),
+    goalCadenceFrequency: r.goal_cadence_frequency === null || r.goal_cadence_frequency === undefined ? null : Number(r.goal_cadence_frequency),
+    goalNeedsWholeAmount: r.goal_needs_whole_amount === null || r.goal_needs_whole_amount === undefined ? null : Number(r.goal_needs_whole_amount) === 1,
+  };
+}
 
 /** Hidden in YNAB's sense: the category's own flag, or its whole group being hidden. */
 function isHidden(r: Record<string, unknown>): boolean {

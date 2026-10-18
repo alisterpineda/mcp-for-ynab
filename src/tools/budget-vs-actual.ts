@@ -6,12 +6,17 @@ import { byName } from "../format/text.js";
 import { currentMonth, MAX_MONTHS, monthWindow } from "./dates.js";
 import { REFRESH, respond, SHARED_NOTES, type Report, type ToolContext } from "./envelope.js";
 import { BY_ID_OR_NAME, resolveFilters } from "./filters.js";
+import { renderGoal } from "./goals.js";
 
-const description = `Which categories do we keep overspending? Assigned against actual, category by category, over a window of months, read from YNAB's own per-month figures, so it cannot disagree with the budget screen.
+/** The orders the rows can come in, each answering a different question about the same figures. */
+const SORTS = ["overspent", "unspent", "spent"] as const;
+type Sort = (typeof SORTS)[number];
 
-Each row sums \`assigned\` and \`activity\` over the window, carries \`available\` as the balance at the end of the last month (absent when YNAB has no figures for it yet), and counts the months that ended in the red (\`overspent_months\`, with \`overspent\` how far in total) and the months where spending ran past the assignment (\`over_assigned_months\`). The two differ: a category can be overspent because last month's balance was already gone, and can outrun its assignment while a carried-over balance keeps it black. \`activity\` keeps YNAB's sign, so spending is negative.
+const description = `Which categories do we keep overspending, and which are padded? Assigned against actual per category over a window of months, from YNAB's own per-month figures.
 
-The window is the last six months ending at the current one. Rows come most-overspent first, by amount, then biggest spender; categories that are zero throughout are counted in \`categories_omitted\`. Hidden categories are kept and marked \`hidden\`. Credit card payment categories are kept and marked \`credit_card_payment\`: their activity is card spending moved onto them minus payments, not spending. The current month is \`partial_month\`, left out of both counts unless \`include_partial\` is set, though its figures still add into the totals. \`filters\` names what \`categories\` and \`groups\` resolved to.
+Each row sums \`assigned\` and \`activity\` (spending negative, YNAB's sign) over the window, carries \`available\` at the end of the last month (absent when YNAB has none yet), and counts the months ending in the red (\`overspent_months\`, with \`overspent\` how far in total). Overspent and over-assigned differ (a carried-over balance can keep an overrun black), so it also counts the months spending ran past the assignment (\`over_assigned_months\`) and fell short of it (\`under_assigned_months\`), netted into \`over_assigned\` or \`unspent\`, whichever side came out ahead. \`goal\` is the category's target as \`list_categories\` gives it.
+
+The window is the last six months ending at the current one. Rows come most-overspent first, then biggest spender; \`sort: "unspent"\` puts the most padded first, \`sort: "spent"\` the biggest spender. Categories zero throughout are counted in \`categories_omitted\`. Hidden ones are marked \`hidden\`; credit card payment categories \`credit_card_payment\`, whose activity is card spending moved onto them minus payments. The current month is \`partial_month\`, left out of the counts and netted amounts unless \`include_partial\`, though its figures still add to the totals. \`filters\` names what \`categories\` and \`groups\` resolved to.
 
 ${SHARED_NOTES}`;
 
@@ -27,8 +32,12 @@ export function registerBudgetVsActual(server: McpServer, store: BudgetStore): v
         end: z.string().optional().describe("Last month of the window, `YYYY-MM`, inclusive. Wins over `months`; defaults to the current month."),
         categories: z.array(z.string()).optional().describe(`Only these categories. ${BY_ID_OR_NAME}`),
         groups: z.array(z.string()).optional().describe(`Only the categories in these category groups. ${BY_ID_OR_NAME}`),
+        sort: z
+          .enum(SORTS)
+          .optional()
+          .describe("`overspent` (the default) puts the most overspent first, then the biggest spender; `unspent` the most assigned-but-not-spent first; `spent` the biggest spender first."),
         include_months: z.boolean().optional().describe("Add each category's month-by-month assigned, activity and available. Off by default."),
-        include_partial: z.boolean().optional().describe("Count the current, unfinished month in `overspent_months`, `overspent` and `over_assigned_months`. Off by default."),
+        include_partial: z.boolean().optional().describe("Count the current, unfinished month in the month counts and in `overspent`, `over_assigned` and `unspent`. Off by default."),
         refresh: z.boolean().optional().describe(REFRESH),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
@@ -43,6 +52,7 @@ interface ComparisonArgs {
   end?: string;
   categories?: string[];
   groups?: string[];
+  sort?: Sort;
   include_months?: boolean;
   include_partial?: boolean;
 }
@@ -71,7 +81,7 @@ function buildComparison(context: ToolContext, args: ComparisonArgs): Report {
 
   let omitted = 0;
   // The milliunit figures travel beside the rendered row: the sort is on the figures, not their rendering.
-  const ranked: { row: Report; overspent: number; activity: number }[] = [];
+  const ranked: { row: Report; overspent: number; activity: number; assigned: number; unspent: number }[] = [];
   for (const bucket of buckets.values()) {
     // A category that was never assigned to, never spent in and never carried a balance has
     // nothing to compare; padding the report with its zeroes would only bury the rest.
@@ -104,6 +114,15 @@ function buildComparison(context: ToolContext, args: ComparisonArgs): Report {
     const overspent = -sum(inTheRed.map((row) => row.balance));
     if (overspent > 0) report.overspent = context.money(overspent);
     report.over_assigned_months = counted.filter((row) => -row.activity > row.budgeted).length;
+    report.under_assigned_months = counted.filter((row) => -row.activity < row.budgeted).length;
+    // Assigned minus spent, netted over the counted months: a month over and a month under cancel,
+    // which is the point — padding is what is left after the swings, not the swings themselves.
+    // One key or the other, so the sign never has to be read off a figure.
+    const unspent = sum(counted.map((row) => row.budgeted + row.activity));
+    if (unspent > 0) report.unspent = context.money(unspent);
+    if (unspent < 0) report.over_assigned = context.money(-unspent);
+    const goal = renderGoal(context, last);
+    if (goal) report.goal = goal;
     if (last.hidden) report.hidden = true;
     if (last.creditCardPayment) report.credit_card_payment = true;
     if (args.include_months === true) {
@@ -118,19 +137,22 @@ function buildComparison(context: ToolContext, args: ComparisonArgs): Report {
         return point;
       });
     }
-    ranked.push({ row: report, overspent, activity });
+    ranked.push({ row: report, overspent, activity, assigned, unspent });
   }
 
-  // Most overspent first — by how far into the red, then how often — then the biggest spender:
-  // activity is negative for spending, so ascending.
+  // Each order answers its own question, and every one ends at the name so equal rows have a
+  // settled place. Activity is negative for spending, so the biggest spender is the lowest.
   const byCategoryName = byName<Report>((row) => row.name as string);
-  ranked.sort(
-    (a, b) =>
-      b.overspent - a.overspent ||
-      (b.row.overspent_months as number) - (a.row.overspent_months as number) ||
-      a.activity - b.activity ||
-      byCategoryName(a.row, b.row),
-  );
+  const orders: Record<Sort, (a: (typeof ranked)[number], b: (typeof ranked)[number]) => number> = {
+    // Most overspent first — by how far into the red, then how often — then the biggest spender.
+    overspent: (a, b) =>
+      b.overspent - a.overspent || (b.row.overspent_months as number) - (a.row.overspent_months as number) || a.activity - b.activity,
+    // Most left unspent first; an overrun is negative here, so it lands last. Equal, the most assigned first.
+    unspent: (a, b) => b.unspent - a.unspent || b.assigned - a.assigned,
+    spent: (a, b) => a.activity - b.activity,
+  };
+  const order = orders[args.sort ?? "overspent"];
+  ranked.sort((a, b) => order(a, b) || byCategoryName(a.row, b.row));
 
   const body: Report = { start: months[0], end: months[months.length - 1] };
   if (partialMonth) body.partial_month = partialMonth;

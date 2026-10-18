@@ -50,11 +50,11 @@ claude mcp add --transport stdio --env YNAB_ACCESS_TOKEN=<your-token> ynab -- np
 - `list_accounts` — account balances and net worth
 - `get_month` — a month's budget summary by category
 - `cash_flow` — income, spending and savings rate by month
-- `spending_breakdown` — spending over a date range, grouped your way
-- `spending_trend` — month-by-month spending for chosen categories
+- `spending_breakdown` — spending over a date range, grouped your way, with each row's typical and lowest month
+- `spending_trend` — month-by-month spending for chosen categories or payees
 - `search_transactions` — find individual transactions
 - `list_scheduled` — upcoming scheduled transactions
-- `budget_vs_actual` — assigned versus spent by category
+- `budget_vs_actual` — assigned versus spent by category: what was overspent, and what was left unspent
 - `sync_status` — cache freshness; force a sync
 
 ## Development

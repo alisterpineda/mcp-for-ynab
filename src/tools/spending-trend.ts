@@ -6,13 +6,13 @@ import { BUCKET_RULES, bucketEcho, bucketsParameter, resolveBuckets, UNCLAIMED, 
 import { historyStart, historyWindow, MAX_MONTHS, monthWindow } from "./dates.js";
 import { REFRESH, respond, SHARED_NOTES, ToolError, type Report, type ToolContext } from "./envelope.js";
 import { BY_ID_OR_NAME, resolveFilters } from "./filters.js";
-import { median } from "./stats.js";
+import { renderSpread } from "./stats.js";
 
-const description = `Is it creeping up? A month-by-month series of spending for the categories or category groups you name, with the average, median, lowest and highest month. This is the tool for "how has dining out gone over the last six months?" and "are we spending more on groceries than we used to?".
+const description = `Is it creeping up? A month-by-month series of spending for the categories, category groups or payees you name, with the average, median, lowest and highest month. This is the tool for "how has dining out gone over the last six months?" and "is that subscription charging more?".
 
-Name at least one of \`categories\`, \`groups\` or \`buckets\`. Each category or group is a series in the order asked, named by \`id\` and \`name\` so a partial name shows what it landed on; a group series sums its categories. Bucket series follow, with no \`id\`. The window is the last six months ending at the current one, and never runs past it. Nor does it reach back before the budget: a window that would starts at the budget's first month, named by \`history_starts\`, so the series is shorter than asked and the statistics cover only months the budget existed in. Every month is present in chronological order, and one with no activity reads \`spent: 0\`.
+Name at least one of \`categories\`, \`groups\`, \`payees\` or \`buckets\`. Each category, group and payee is a series in the order asked, named by \`id\` and \`name\` so a partial name shows what it landed on; a group series sums its categories, a payee series its spending lines in any category. Bucket series follow, with no \`id\`. The window is the last six months ending at the current one and never runs past it; one reaching back before the budget starts at its first month (\`history_starts\`), so the statistics cover only months the budget existed in. Every month is present in chronological order, and one with no activity reads \`spent: 0\`.
 
-\`spent\` is positive for spending and negative for a month that netted a refund, counted by the same rule as \`spending_breakdown\`: a categorized transfer to a tracking account counts, transfers between budget accounts and income do not, and each split line lands in its own category. The current month is flagged \`partial\` and left out of \`average\`, \`median\`, \`min\` and \`max\` unless \`include_partial\` is set; with no complete month those keys are absent rather than guessed.
+\`spent\` is positive for spending and negative for a month that netted a refund, counted by the same rule as \`spending_breakdown\`: a categorized transfer to a tracking account counts, transfers between budget accounts and income do not, and each split line lands in its own category. The current month is flagged \`partial\` and left out of \`average\`, \`median\`, \`min\` and \`max\` unless \`include_partial\` is set; with no complete month those keys are absent.
 
 ${SHARED_NOTES}`;
 
@@ -25,8 +25,9 @@ export function registerSpendingTrend(server: McpServer, store: BudgetStore): vo
       inputSchema: {
         categories: z.array(z.string()).optional().describe(`Categories to trend, one series each. ${BY_ID_OR_NAME}`),
         groups: z.array(z.string()).optional().describe(`Category groups to trend, one series each summing the group's categories. ${BY_ID_OR_NAME}`),
+        payees: z.array(z.string()).optional().describe(`Payees to trend, one series each, counting the payee's spending lines whatever their category. ${BY_ID_OR_NAME}`),
         buckets: bucketsParameter(
-          `Your own grouping of categories: each bucket becomes a series, after any \`categories\` and \`groups\` series, summing the categories it names directly or through their groups. ${BUCKET_RULES} ${UNCLAIMED} goes to an \`unassigned\` series of its own, so the bucket series and \`unassigned\` add up to all spending, month by month.`,
+          `Your own grouping of categories: each bucket becomes a series, after any \`categories\`, \`groups\` and \`payees\` series, summing the categories it names directly or through their groups. ${BUCKET_RULES} ${UNCLAIMED} goes to an \`unassigned\` series of its own, so the bucket series and \`unassigned\` add up to all spending, month by month.`,
         ),
         months: z.number().int().positive().max(MAX_MONTHS).optional().describe(`How many months the window covers, ending at the current month. Defaults to 6, at most ${MAX_MONTHS}.`),
         start: z.string().optional().describe("First month of the window, `YYYY-MM`. Wins over `months`."),
@@ -43,6 +44,7 @@ export function registerSpendingTrend(server: McpServer, store: BudgetStore): vo
 interface TrendArgs {
   categories?: string[];
   groups?: string[];
+  payees?: string[];
   buckets?: BucketInput[];
   months?: number;
   start?: string;
@@ -54,25 +56,27 @@ interface TrendArgs {
 interface SeriesSpec {
   id: string;
   name: string;
-  kind: "category" | "category_group";
+  kind: "category" | "category_group" | "payee";
 }
 
 function buildTrend(context: ToolContext, args: TrendArgs): Report {
-  const [categories, groups, bucketInputs] = [args.categories ?? [], args.groups ?? [], args.buckets ?? []];
+  const [categories, groups, payees, bucketInputs] = [args.categories ?? [], args.groups ?? [], args.payees ?? [], args.buckets ?? []];
   // Trending the whole budget is `spending_breakdown` with `group_by: "month"`; asking here with
   // nothing named is a question that has no series in it, so say that rather than answer something else.
-  if (categories.length + groups.length + bucketInputs.length === 0) {
-    throw new ToolError("Name at least one category, category group or bucket to trend, by id or name.");
+  if (categories.length + groups.length + payees.length + bucketInputs.length === 0) {
+    throw new ToolError("Name at least one category, category group, payee or bucket to trend, by id or name.");
   }
 
   const budgetId = context.budget.id;
   // The resolver already named what it matched, so the series are labelled the way the echo is.
-  const resolved = resolveFilters(context, { categories, groups });
+  const resolved = resolveFilters(context, { categories, groups, payees });
   const categoryIds = resolved.ids.categoryIds ?? [];
   const groupIds = resolved.ids.groupIds ?? [];
+  const payeeIds = resolved.ids.payeeIds ?? [];
   const specs: SeriesSpec[] = [
     ...(resolved.echo?.categories ?? []).map(({ id, name }) => ({ id, name, kind: "category" as const })),
     ...(resolved.echo?.groups ?? []).map(({ id, name }) => ({ id, name, kind: "category_group" as const })),
+    ...(resolved.echo?.payees ?? []).map(({ id, name }) => ({ id, name, kind: "payee" as const })),
   ];
   const bucketing = bucketInputs.length > 0 ? resolveBuckets(context, bucketInputs) : null;
 
@@ -89,6 +93,7 @@ function buildTrend(context: ToolContext, args: TrendArgs): Report {
   const found = new Map<string, Map<string, number>>();
   if (categoryIds.length > 0) index(found, context.db.spendingByMonth(budgetId, "category", { from, to, categoryIds }));
   if (groupIds.length > 0) index(found, context.db.spendingByMonth(budgetId, "category_group", { from, to, groupIds }));
+  if (payeeIds.length > 0) index(found, context.db.spendingByMonth(budgetId, "payee", { from, to, payeeIds }));
 
   const includePartial = args.include_partial === true;
   const figuresOf = (byMonth: Map<string, number>) => figures(context, byMonth, months, partialMonth, includePartial);
@@ -143,8 +148,6 @@ function figures(
   includePartial: boolean,
 ): Report {
   const points: Report[] = [];
-  // The statistics are kept in milliunits and rendered once at the end: an average of already
-  // rounded months would drift away from the months it claims to summarise.
   const counted: number[] = [];
   for (const month of months) {
     // Spending is stored negative; the series reports it the way a person says it, positive.
@@ -155,12 +158,5 @@ function figures(
     points.push(point);
   }
 
-  const series: Report = { months: points };
-  if (counted.length > 0) {
-    series.average = context.money(counted.reduce((sum, value) => sum + value, 0) / counted.length);
-    series.median = context.money(median(counted));
-    series.min = context.money(Math.min(...counted));
-    series.max = context.money(Math.max(...counted));
-  }
-  return series;
+  return { months: points, ...renderSpread(context, counted) };
 }

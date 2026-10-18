@@ -3,6 +3,13 @@ import { describe, it } from "node:test";
 import { BUDGET_ID, monthFromNow, spendingBudget, transaction } from "./fixtures.js";
 import { harness } from "./mcp.js";
 
+interface Monthly {
+  average: number;
+  median: number;
+  min: number;
+  max: number;
+}
+
 interface Row {
   id?: string;
   name: string;
@@ -13,6 +20,8 @@ interface Row {
   /** Every row but a month row. */
   months_active?: number;
   share: number;
+  /** Every row but a month row, when the range spans more than one month. */
+  monthly?: Monthly;
 }
 
 const rowsOf = (body: Record<string, unknown>): Row[] => body.rows as Row[];
@@ -59,6 +68,14 @@ describe("spending_breakdown", () => {
       { id: "c3", name: "Dining Out", group: "Everyday", spent: 18, count: 1, months_active: 1, share: 5.4 },
     ]);
     assert.ok(!("other" in body), "nothing was cut, so there is no remainder row");
+  });
+
+  it("says nothing month by month about a range of one month", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", { start: "2026-08", end: "2026-08" });
+    assert.ok(!("months_counted" in body), "one month has nothing to average over");
+    assert.ok(!("partial_month" in body));
+    for (const row of rowsOf(body)) assert.ok(!("monthly" in row), `${row.name}: no monthly figures for one month`);
   });
 
   it("nets a refund against its own category and against the total", async () => {
@@ -689,5 +706,135 @@ describe("spending_breakdown months_active", () => {
       buckets: [{ name: "Food", categories: ["Groceries", "Dining Out"] }],
     });
     assert.equal(bucketsOf(body)[0].months_active, 1);
+  });
+});
+
+describe("spending_breakdown month by month", () => {
+  it("gives every row its average, median, lowest and highest month over the range, zero-filled", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", { start: "2026-07", end: "2026-09" });
+    assert.equal(body.months_counted, 3);
+    assert.ok(!("partial_month" in body), "every month in the range is over");
+    // Groceries: 50 (net of the refund), 135, 80. Dining Out: 32, 18, 14. The hobby: 15, then nothing.
+    assert.deepEqual(byName(body, "Groceries").monthly, { average: 88.33, median: 80, min: 50, max: 135 });
+    assert.deepEqual(byName(body, "Dining Out").monthly, { average: 21.33, median: 18, min: 14, max: 32 });
+    assert.deepEqual(byName(body, "Old hobby").monthly, { average: 5, median: 0, min: 0, max: 15 });
+    assert.equal(byName(body, "Old hobby").months_active, 1, "months_active still counts the months with a line");
+  });
+
+  it("keeps the rows that have no entity apart from each other", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", { start: "2026-07", end: "2026-09" });
+    // Both have no category id behind them; the July cash is Uncategorized, the 5 is in a deleted category.
+    assert.deepEqual(byName(body, "Uncategorized").monthly, { average: 8.33, median: 0, min: 0, max: 25 });
+    assert.deepEqual(byName(body, "(deleted category)").monthly, { average: 1.67, median: 0, min: 0, max: 5 });
+  });
+
+  it("works for payees and accounts too", async () => {
+    await using h = await spending();
+    const payees = await h.json("spending_breakdown", { start: "2026-07", end: "2026-09", group_by: "payee" });
+    // Costco: July's split nets to 80, then 90, then 80.
+    assert.deepEqual(byName(payees, "Costco").monthly, { average: 83.33, median: 80, min: 80, max: 90 });
+    assert.deepEqual(byName(payees, "(no payee)").monthly, { average: 1.67, median: 0, min: 0, max: 5 });
+    const accounts = await h.json("spending_breakdown", { start: "2026-07", end: "2026-09", group_by: "account" });
+    // Visa: dining 12 + hobby 15 in July, farm market 45 in August, diner 14 in September.
+    assert.deepEqual(byName(accounts, "Visa").monthly, { average: 28.67, median: 27, min: 14, max: 45 });
+  });
+
+  it("averages over the months the budget existed in, not the whole range asked for", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", { start: "2026-04", end: "2026-09" });
+    assert.equal(body.history_starts, "2026-07");
+    assert.equal(body.months_counted, 3, "April to June were not months of spending nothing");
+    assert.deepEqual(byName(body, "Mortgage").monthly, { average: 150, median: 150, min: 150, max: 150 });
+  });
+
+  it("gives bucket rows and the unassigned categories their monthly figures as well", async () => {
+    await using h = await spending();
+    const body = await h.json("spending_breakdown", {
+      start: "2026-07",
+      end: "2026-08",
+      buckets: [{ name: "Food", categories: ["Groceries", "Dining Out"] }],
+    });
+    // Food: 50 + 32 in July, 135 + 18 in August.
+    assert.deepEqual(byName(body, "Food").monthly, { average: 117.5, median: 117.5, min: 82, max: 153 });
+    const unassigned = (body.unassigned as { categories: Row[] }).categories;
+    const household = unassigned.find((row) => row.name === "Household");
+    assert.deepEqual(household?.monthly, { average: 30, median: 30, min: 30, max: 30 });
+  });
+
+  it("takes the figures only from the months the range covers whole", async () => {
+    await using h = await spending();
+    // July 19 to September 15 cuts into July and September; only August is a whole month.
+    const body = await h.json("spending_breakdown", { start: "2026-07-19", end: "2026-09-15" });
+    assert.equal(body.months_counted, 1);
+    assert.deepEqual(byName(body, "Groceries").monthly, { average: 135, median: 135, min: 135, max: 135 });
+    assert.equal(byName(body, "Groceries").spent, 135 + 80, "the total still covers every line in the range");
+    // A range that covers no month whole has no figures to give.
+    const none = await h.json("spending_breakdown", { start: "2026-07-19", end: "2026-08-15" });
+    assert.ok(!("months_counted" in none));
+    for (const row of rowsOf(none)) assert.ok(!("monthly" in row), `${row.name}: a cut month is not a month of spending that little`);
+  });
+
+  it("keeps working over more than ten years of history, where a month series would be capped", async () => {
+    await using h = await harness({ budget: spendingBudget({ first_month: "2015-01-01" }) });
+    const body = await h.json("spending_breakdown", { start: "2015-01", end: "2026-09", group_by: "payee" });
+    assert.ok(rowsOf(body).length > 0);
+    assert.equal(body.months_counted, 141, "every month from 2015-01 to 2026-09");
+    const { isError, text } = await h.call("spending_breakdown", { start: "2015-01", end: "2026-09", group_by: "month" });
+    assert.equal(isError, true, "a row per month is still capped");
+    assert.match(text, /141 months/);
+  });
+
+  it("leaves the month rows and the remainder alone", async () => {
+    await using h = await spending();
+    const months = await h.json("spending_breakdown", { start: "2026-07", end: "2026-09", group_by: "month" });
+    assert.ok(!("months_counted" in months), "a month series is the figures themselves");
+    for (const row of rowsOf(months)) assert.ok(!("monthly" in row));
+    const capped = await h.json("spending_breakdown", { start: "2026-07", end: "2026-09", limit: 1 });
+    assert.ok(!("monthly" in (capped.other as Record<string, unknown>)), "the remainder is a sum, not a row");
+  });
+});
+
+describe("spending_breakdown and the month still being lived in", () => {
+  /** Spending in the current month and the one before it only, so today's date need not be known. */
+  const aroundToday = () => {
+    const [previous, current] = [monthFromNow(-1), monthFromNow(0)];
+    return spendingBudget({
+      first_month: `${previous}-01`,
+      last_month: `${current}-01`,
+      months: [],
+      transactions: [
+        transaction("x1", `${previous}-05`, -20_000, { category_id: "c1" }),
+        transaction("x2", `${current}-01`, -5_000, { category_id: "c1" }),
+      ],
+      subtransactions: [],
+    });
+  };
+
+  it("flags the current month and leaves it out of the monthly figures", async () => {
+    await using h = await harness({ budget: aroundToday() });
+    const body = await h.json("spending_breakdown", { start: monthFromNow(-1) });
+    assert.equal(body.partial_month, monthFromNow(0));
+    assert.equal(body.months_counted, 1, "only the finished month is averaged over");
+    const groceries = byName(body, "Groceries");
+    assert.equal(groceries.spent, 25, "the total still covers every line in the range");
+    assert.deepEqual(groceries.monthly, { average: 20, median: 20, min: 20, max: 20 });
+  });
+
+  it("does not count months that have not come as months of spending nothing", async () => {
+    await using h = await harness({ budget: aroundToday() });
+    const body = await h.json("spending_breakdown", { start: monthFromNow(-1), end: monthFromNow(2) });
+    assert.equal(body.months_counted, 1, "the finished month only; the current one is partial, the two after have not happened");
+    assert.equal(body.partial_month, monthFromNow(0));
+    assert.deepEqual(byName(body, "Groceries").monthly, { average: 20, median: 20, min: 20, max: 20 });
+  });
+
+  it("counts the current month when asked to", async () => {
+    await using h = await harness({ budget: aroundToday() });
+    const body = await h.json("spending_breakdown", { start: monthFromNow(-1), include_partial: true });
+    assert.equal(body.partial_month, monthFromNow(0));
+    assert.equal(body.months_counted, 2);
+    assert.deepEqual(byName(body, "Groceries").monthly, { average: 12.5, median: 12.5, min: 5, max: 20 });
   });
 });
